@@ -139,8 +139,8 @@ accepted. Up to 50,000 members.
 
 ### Updates
 
-Ed25519-signed manifests (monotonic version, binary + lockfile hashes,
-real SLH-DSA-SHA2-128s + Ed25519 hybrid signatures, downgrade rejection)
+Hybrid-signed manifests (Ed25519 + SLH-DSA-SHA2-128s, both mandatory;
+monotonic version; binary + lockfile hashes; downgrade rejection)
 distributed over onion fetches
 and signature-checked P2P gossip where newest-verified wins.
 
@@ -201,7 +201,7 @@ null://<56-char-onion>.onion?k=<base64 ML-KEM-1024 ek>&i=<ml-dsa:fingerprint>&t=
 --usbguard                   panic-wipe on new /dev nodes
 --auto-lock-secs <N>         idle lock (default 1800)
 --dead-man-secs <N>          idle wipe + exit, 0 disables (default 0)
---safe                       decoy IRC-like interface
+--safe                       decoy IRC-like interface (loopback/TUI sessions)
 --hsm <software|check>       local-secret backend / hardware probe
 ```
 
@@ -222,12 +222,14 @@ null://<56-char-onion>.onion?k=<base64 ML-KEM-1024 ek>&i=<ml-dsa:fingerprint>&t=
 - **Reproducibility**: `cargo run -p xtask -- repro` builds twice and
   compares hashes (verified identical).
 - **Gates**: `cargo fmt --check`, `cargo clippy --locked --all-targets
-  -- -D warnings`, `cargo test --workspace` (see `.github/workflows/ci.yml`).
+  -- -D warnings`, `cargo test --workspace`,
+  `cargo xtask fuzz` (see `.github/workflows/ci.yml`).
 
 ### Standards mapping
 
-NIST FIPS 203 (ML-KEM-1024) · FIPS 204 (ML-DSA-65) · FIPS 205 slot reserved
-(SLH-DSA-SHA2-128s, verified) · MLS-inspired group commits (RFC 9420 family) · Apple PQ3
+NIST FIPS 203 (ML-KEM-1024) · FIPS 204 (ML-DSA-65) · FIPS 205
+(SLH-DSA-SHA2-128s hybrid release signatures, both mandatory) ·
+MLS-inspired group commits (RFC 9420 family) · Apple PQ3
 Level-3-style ongoing rekeying · SLSA-style reproducible builds.
 
 ---

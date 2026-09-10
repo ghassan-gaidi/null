@@ -50,7 +50,7 @@ struct Args {
     /// and serve one inbound handshake. Prints your null:// string.
     #[arg(long)]
     listen: Option<u16>,
-    /// Full-screen Ratatui chat over a loopback session (real pipeline).
+    /// Full-screen Ratatui chat (loopback or live sessions; real pipeline).
     #[arg(long)]
     tui: bool,
     /// Local-secret backend: `software` (Tier 1, RAM-only default) or
