@@ -75,6 +75,19 @@ impl KyberKeypair {
         Self { ek, dk }
     }
 
+    /// Deterministic pair from a 64B seed (ratchet-tree node keys).
+    /// Same seed ⇒ same pair on every member, so public trees converge
+    /// without exchanging private material.
+    pub fn generate_deterministic(seed64: &[u8; 64]) -> Self {
+        use ml_kem::B32;
+        let mut d = [0u8; 32];
+        let mut z = [0u8; 32];
+        d.copy_from_slice(&seed64[..32]);
+        z.copy_from_slice(&seed64[32..]);
+        let (dk, ek) = MlKem1024::generate_deterministic(&B32::from(d), &B32::from(z));
+        Self { ek, dk }
+    }
+
     pub fn encapsulate(&self) -> (Vec<u8>, Vec<u8>) {
         let (ct, k) = self.ek.encapsulate(&mut OsRng).expect("kyber encapsulate");
         (ct.as_slice().to_vec(), k.as_slice().to_vec())
@@ -1022,6 +1035,25 @@ impl EncryptedMessage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deterministic_keygen_converges() {
+        let seed = [5u8; 64];
+        let a = KyberKeypair::generate_deterministic(&seed);
+        let b = KyberKeypair::generate_deterministic(&seed);
+        assert_eq!(a.ek_bytes(), b.ek_bytes());
+        let c = KyberKeypair::generate_deterministic(&[6u8; 64]);
+        assert_ne!(a.ek_bytes(), c.ek_bytes());
+        // And it roundtrips: encap to A decaps with B.
+        let (ct, k1) = {
+            let ek = &a.ek;
+            use kem::Encapsulate;
+            let (ct, k) = ek.encapsulate(&mut OsRng).unwrap();
+            (ct.as_slice().to_vec(), k.as_slice().to_vec())
+        };
+        let k2 = b.decapsulate(&ct).unwrap();
+        assert_eq!(k1, k2);
+    }
 
     #[test]
     fn handshake_and_message_roundtrip() {

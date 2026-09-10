@@ -110,7 +110,7 @@ fn fuzz(iters: usize, seed: u64) -> Result<()> {
     use null_core::ConnectionString;
     use null_crypto::{EncryptedMessage, HandshakeInit, HandshakeResponse};
     use null_frame::Frame;
-    use null_group::CommitEnvelope;
+    use null_group::{TreeCommit, WelcomePkg};
     use null_session::HandshakeReassembler;
     use null_update::UpdateManifest;
 
@@ -131,7 +131,8 @@ fn fuzz(iters: usize, seed: u64) -> Result<()> {
         let _ = HandshakeResponse::decode(&h);
 
         // 4. Group envelope + update manifest + connection string.
-        let _ = CommitEnvelope::decode(&rng_bytes(&mut rng, 2000));
+        let _ = TreeCommit::decode(&rng_bytes(&mut rng, 2000));
+        let _ = WelcomePkg::decode(&rng_bytes(&mut rng, 4000));
         let mlen = rng.below(401);
         let _ = UpdateManifest::from_bytes(rng.ascii(mlen).as_bytes());
         let slen = rng.below(121);

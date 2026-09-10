@@ -10,7 +10,7 @@ provides **Level 3 post-quantum messaging security**: ongoing post-quantum
 rekeying inside a continuous triple ratchet, multi-transport censorship
 resistance, and hardware-aware key isolation — all in a terminal-native app.
 
-Everything below is implemented and tested in this repository: 60 tests green,
+Everything below is implemented and tested in this repository: 67 tests green,
 `clippy -D warnings` clean, reproducible builds verified bit-identical, and
 live two-process chats (deniable, verified, TUI) proven over real sockets.
 
@@ -129,13 +129,15 @@ including in live chats.
   is deliberately *never* mixed with device-local material (peers could not
   converge) — the HSM guards local identity secrets.
 
-### Groups (Null-MLS)
+### Groups (Null-MLS TreeKEM)
 
-Tree-secret evolution with PQ KeyPackages: Kyber-sealed `Welcome` envelopes
-for joiners (with roster sync) and per-member commit envelopes on removal
-(true PCS — the removed member cannot open the new epoch). Epochs hash-chain
-(`prev_hash`), so forks, gaps, and replays are rejected, never silently
-accepted. Up to 50,000 members.
+Real ratchet tree with PQ (ML-KEM-1024) node keys: every commit refreshes
+the committer's direct path and encrypts each path secret to the sibling
+subtrees' resolutions — **O(log n) encapsulations** (proven: 3 bundles at
+depth 3 for 8 members, vs 8 one-per-member). Removals blank nodes
+(resolution routes around blanks); epochs hash-chain (`prev_hash`), so
+forks, gaps, and replays are rejected; Welcomes carry roster + public tree
++ joiner path. Up to 50,000 members.
 
 ### Updates
 
@@ -209,10 +211,11 @@ null://<56-char-onion>.onion?k=<base64 ML-KEM-1024 ek>&i=<ml-dsa:fingerprint>&t=
 
 ## Verification
 
-- **60 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
+- **67 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
   healing at message 51, lossless rekey-loss recovery, handshake codecs +
   fragmentation, TCP end-to-end (deniable *and* verified, incl.
-  safety-number agreement), group Welcome/removal/fork-rejection, hybrid
+  safety-number agreement), TreeKEM commits/openings/blanks, group
+  Welcome/removal/fork-rejection, hybrid
   release signing, update gossip, TUI rendering + key routing, live-protocol
   stub servers, HSM binding, evdev keymap.
 - **Live proofs**: scripted two-process chats (deniable, verified with pinned
@@ -239,8 +242,9 @@ Level-3-style ongoing rekeying · SLSA-style reproducible builds.
 - Formal protocol models (Tamarin/ProVerif) and nightly-only harnesses
   (miri, cargo-fuzz) are the next track. A deterministic stable fuzz corpus
   (`cargo xtask fuzz`, wired into CI) covers every wire decoder today.
-- Group commits are O(n) re-encapsulations rather than O(log n) TreeKEM
-  path secrets — fine for typical groups, not yet 50k-optimal.
+- Group commits are O(log n) TreeKEM path commits (proven by test: 3 bundles
+  at depth 3 for 8 members). Remaining scaling work is operational (large-group
+  fan-out batching), not cryptographic.
 - Bridge transports need operator-provided sidecars/bridges.
 - Secure Enclave support is macOS-gated scaffolding; TPM/YubiKey key
   *operations* need their native stacks (detection is implemented).
