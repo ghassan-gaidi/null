@@ -205,6 +205,30 @@ pub fn pack_goodbye(counter: u64) -> anyhow::Result<Frame> {
         .map_err(|e| anyhow::anyhow!("goodbye frame: {e}"))
 }
 
+/// One fan-out target: a mutable session plus the AD bound for that peer.
+/// AD differs per peer (ek-bound), so each target carries its own.
+pub struct Fanout<'a> {
+    pub session: &'a mut Session,
+    pub ad: Vec<u8>,
+}
+
+/// Encrypt one plaintext for N peer sessions (multi-device / group fan-out).
+/// Returns per-target frame vectors in input order. A failure on one target
+/// aborts the whole batch (caller decides retry policy) — but targets
+/// packed before the failure keep their advanced ratchet state, so callers
+/// must treat a partial batch as sent. Prefer packing for all-active sets
+/// produced by `DeviceSet::active_devices`.
+pub fn fanout_pack(
+    targets: &mut [Fanout<'_>],
+    plaintext: &[u8],
+) -> anyhow::Result<Vec<Vec<Frame>>> {
+    let mut out = Vec::with_capacity(targets.len());
+    for t in targets.iter_mut() {
+        out.push(pack_data(t.session, plaintext, &t.ad)?);
+    }
+    Ok(out)
+}
+
 /// Pack a rekey replay request for generation `from_gen`.
 pub fn pack_rekey_request(counter: u64, from_gen: u64) -> anyhow::Result<Frame> {
     let mut payload = vec![REKEY_REQUEST_TAG];

@@ -156,6 +156,9 @@ pub struct HandshakeInit {
     /// Initiator's ML-DSA-65 vk (verified mode only).
     pub identity_vk: Option<Vec<u8>>,
     pub signature: Option<Vec<u8>>,
+    /// Initiator device id (multi-device binding, `docs/multidevice.md`).
+    /// All zeros = unbound (single-device / legacy behavior).
+    pub device_id: [u8; 16],
 }
 
 /// Optional verified identity: ML-DSA-65 signatures (FIPS 204) over the
@@ -199,6 +202,20 @@ pub mod identity {
         /// `ml-dsa:<hex(sha3_256(vk))>` fingerprint for `null://` strings.
         pub fn fingerprint(&self) -> String {
             fingerprint_hex(&self.verifying_bytes())
+        }
+
+        /// Stable per-device id without storage: `SHA3-256(seed ‖ tag ‖ slot)[..16]`.
+        /// Same identity + same slot always yields the same device id, so a
+        /// device keeps its identity across restarts with zero disk writes.
+        pub fn device_id(&self, slot: u8) -> [u8; 16] {
+            let mut h = Sha3_256::new();
+            h.update(self.seed);
+            h.update(b"Null-v2.0-device:");
+            h.update([slot]);
+            let digest = h.finalize();
+            let mut out = [0u8; 16];
+            out.copy_from_slice(&digest[..16]);
+            out
         }
 
         pub fn sign(&self, msg: &[u8]) -> Result<Vec<u8>> {
@@ -256,6 +273,15 @@ pub mod identity {
             assert!(fp.starts_with("ml-dsa:"));
             assert_eq!(fp, fingerprint_hex(&vk));
         }
+
+        #[test]
+        fn device_id_stable_per_slot() {
+            let id = IdentityKey::generate();
+            assert_eq!(id.device_id(0), id.device_id(0));
+            assert_ne!(id.device_id(0), id.device_id(1));
+            assert_ne!(id.device_id(0), IdentityKey::generate().device_id(0));
+            assert_ne!(id.device_id(0), [0u8; 16]);
+        }
     }
 }
 
@@ -268,6 +294,9 @@ pub struct HandshakeResponse {
     /// Responder's ML-DSA-65 vk (verified mode only).
     pub identity_vk: Option<Vec<u8>>,
     pub signature: Option<Vec<u8>>,
+    /// Responder device id (multi-device binding, `docs/multidevice.md`).
+    /// All zeros = unbound.
+    pub device_id: [u8; 16],
 }
 
 fn put_blob(out: &mut Vec<u8>, b: &[u8]) {
@@ -314,8 +343,9 @@ fn get_sig(mut bytes: &[u8]) -> Result<(Option<Vec<u8>>, &[u8])> {
 }
 
 impl HandshakeInit {
-    /// Wire: `eph(32) ‖ ek_blob ‖ ct_blob ‖ vk_opt ‖ sig`.
-    /// `vk_opt`: flag(1: 0/1) ‖ vk_blob?.
+    /// Wire: `eph(32) ‖ ek_blob ‖ ct_blob ‖ vk_opt ‖ sig ‖ device_id(16)`.
+    /// `vk_opt`: flag(1: 0/1) ‖ vk_blob?. Handshake encoding v2: the
+    /// trailing device id is mandatory (zeros = unbound).
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.ephemeral_pub);
@@ -329,6 +359,7 @@ impl HandshakeInit {
             None => out.push(0),
         }
         put_sig(&mut out, &self.signature);
+        out.extend_from_slice(&self.device_id);
         out
     }
 
@@ -352,19 +383,24 @@ impl HandshakeInit {
             _ => return Err(NullError::Crypto("bad handshake vk flag".into())),
         };
         let (signature, rest) = get_sig(rest)?;
-        if !rest.is_empty() {
-            return Err(NullError::Crypto("handshake init trailing bytes".into()));
+        if rest.len() != 16 {
+            return Err(NullError::Crypto("handshake init missing device id".into()));
         }
+        let mut device_id = [0u8; 16];
+        device_id.copy_from_slice(rest);
         Ok(Self {
             ephemeral_pub,
             kyber_ct,
             kyber_ek,
             identity_vk,
             signature,
+            device_id,
         })
     }
 
     /// Transcript bytes covered by the initiator's ML-DSA signature.
+    /// Includes the device id so sessions cannot be re-bound across a
+    /// user's devices without invalidating the signature.
     pub fn signing_msg(&self) -> Vec<u8> {
         let mut m = Vec::new();
         m.extend_from_slice(&self.ephemeral_pub);
@@ -373,12 +409,13 @@ impl HandshakeInit {
         if let Some(vk) = &self.identity_vk {
             m.extend_from_slice(vk);
         }
+        m.extend_from_slice(&self.device_id);
         m
     }
 }
 
 impl HandshakeResponse {
-    /// Wire: `eph(32) ‖ ek_blob ‖ vk_opt ‖ sig`.
+    /// Wire: `eph(32) ‖ ek_blob ‖ vk_opt ‖ sig ‖ device_id(16)`.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.ephemeral_pub);
@@ -391,6 +428,7 @@ impl HandshakeResponse {
             None => out.push(0),
         }
         put_sig(&mut out, &self.signature);
+        out.extend_from_slice(&self.device_id);
         out
     }
 
@@ -415,20 +453,24 @@ impl HandshakeResponse {
             _ => return Err(NullError::Crypto("bad handshake vk flag".into())),
         };
         let (signature, rest) = get_sig(rest)?;
-        if !rest.is_empty() {
+        if rest.len() != 16 {
             return Err(NullError::Crypto(
-                "handshake response trailing bytes".into(),
+                "handshake response missing device id".into(),
             ));
         }
+        let mut device_id = [0u8; 16];
+        device_id.copy_from_slice(rest);
         Ok(Self {
             ephemeral_pub,
             kyber_ek,
             identity_vk,
             signature,
+            device_id,
         })
     }
 
     /// Transcript bytes covered by the responder's ML-DSA signature.
+    /// Includes the responder device id (see init-side note).
     pub fn signing_msg(&self, init_eph: &[u8; 32], init_ct: &[u8]) -> Vec<u8> {
         let mut m = Vec::new();
         m.extend_from_slice(init_eph);
@@ -437,6 +479,7 @@ impl HandshakeResponse {
         if let Some(vk) = &self.identity_vk {
             m.extend_from_slice(vk);
         }
+        m.extend_from_slice(&self.device_id);
         m
     }
 }
@@ -462,6 +505,7 @@ impl HandshakeInitiator {
             kyber_ek: own_kyber.ek_bytes(),
             identity_vk: None,
             signature: None, // deniable default
+            device_id: [0u8; 16],
         };
         Ok((
             Self {
@@ -475,13 +519,16 @@ impl HandshakeInitiator {
         ))
     }
 
-    /// Verified mode (§4.3): attach our ML-DSA-65 vk + signature.
+    /// Verified mode (§4.3): attach our ML-DSA-65 vk + signature, bound to
+    /// our device id so the session cannot be re-bound across devices.
     pub fn initiate_verified(
         peer_kyber_ek: &[u8],
         id: &identity::IdentityKey,
+        device_id: [u8; 16],
     ) -> Result<(Self, HandshakeInit)> {
         let (state, mut init) = Self::initiate(peer_kyber_ek)?;
         init.identity_vk = Some(id.verifying_bytes());
+        init.device_id = device_id;
         init.signature = Some(id.sign(&init.signing_msg())?);
         Ok((state, init))
     }
@@ -536,16 +583,17 @@ pub fn respond(
     init: &HandshakeInit,
     kyber_longterm: &KyberKeypair,
 ) -> Result<(HandshakeResponse, Session, Vec<u8>)> {
-    respond_inner(init, kyber_longterm, None)
+    respond_inner(init, kyber_longterm, None, [0u8; 16])
 }
 
 /// Verified responder (§4.3): checks the initiator's ML-DSA signature, then
-/// signs the transcript with our identity key.
+/// signs the transcript with our identity key, bound to our device id.
 pub fn respond_verified(
     init: &HandshakeInit,
     kyber_longterm: &KyberKeypair,
     id: &identity::IdentityKey,
     expected_fp: Option<&str>,
+    device_id: [u8; 16],
 ) -> Result<(HandshakeResponse, Session, Vec<u8>)> {
     let vk = init
         .identity_vk
@@ -562,6 +610,7 @@ pub fn respond_verified(
         kyber_ek: init.kyber_ek.clone(),
         identity_vk: init.identity_vk.clone(),
         signature: None,
+        device_id: init.device_id,
     };
     identity::IdentityKey::verify(vk, &probe.signing_msg(), sig)?;
     if let Some(fp) = expected_fp {
@@ -572,13 +621,14 @@ pub fn respond_verified(
             )));
         }
     }
-    respond_inner(init, kyber_longterm, Some(id))
+    respond_inner(init, kyber_longterm, Some(id), device_id)
 }
 
 fn respond_inner(
     init: &HandshakeInit,
     kyber_longterm: &KyberKeypair,
     id: Option<&identity::IdentityKey>,
+    device_id: [u8; 16],
 ) -> Result<(HandshakeResponse, Session, Vec<u8>)> {
     let k_kyber = kyber_longterm.decapsulate(&init.kyber_ct)?;
     let ek_b = EphemeralKey::generate();
@@ -591,9 +641,11 @@ fn respond_inner(
         kyber_ek: kyber_longterm.ek_bytes(),
         identity_vk: None,
         signature: None,
+        device_id: [0u8; 16],
     };
     if let Some(idkey) = id {
         resp.identity_vk = Some(idkey.verifying_bytes());
+        resp.device_id = device_id;
         let transcript = resp.signing_msg(&init.ephemeral_pub, &init.kyber_ct);
         resp.signature = Some(idkey.sign(&transcript)?);
     }
@@ -1084,25 +1136,51 @@ mod tests {
         let id_b = IdentityKey::generate();
         let fp_b = id_b.fingerprint();
         // Full verified flow with fingerprint pinning.
-        let (initiator, init) =
-            HandshakeInitiator::initiate_verified(&responder_kp.ek_bytes(), &id_a).unwrap();
+        let (initiator, init) = HandshakeInitiator::initiate_verified(
+            &responder_kp.ek_bytes(),
+            &id_a,
+            id_a.device_id(0),
+        )
+        .unwrap();
         // Wire roundtrip preserves vk + sig.
         let init2 = HandshakeInit::decode(&init.encode()).unwrap();
         assert!(init2.identity_vk.is_some() && init2.signature.is_some());
-        let (resp, mut sess_b, _) = respond_verified(&init2, &responder_kp, &id_b, None).unwrap();
+        let (resp, mut sess_b, _) =
+            respond_verified(&init2, &responder_kp, &id_b, None, id_b.device_id(0)).unwrap();
         let resp2 = HandshakeResponse::decode(&resp.encode()).unwrap();
         let mut sess_a = initiator.finalize_verified(&resp2, Some(&fp_b)).unwrap();
         // Wrong pin rejected.
-        let (initiator2, init_v2) =
-            HandshakeInitiator::initiate_verified(&responder_kp.ek_bytes(), &id_a).unwrap();
-        let (resp_v2, _, _) = respond_verified(&init_v2, &responder_kp, &id_b, None).unwrap();
+        let (initiator2, init_v2) = HandshakeInitiator::initiate_verified(
+            &responder_kp.ek_bytes(),
+            &id_a,
+            id_a.device_id(0),
+        )
+        .unwrap();
+        let (resp_v2, _, _) =
+            respond_verified(&init_v2, &responder_kp, &id_b, None, id_b.device_id(0)).unwrap();
         assert!(initiator2
             .finalize_verified(&resp_v2, Some("ml-dsa:deadbeef"))
             .is_err());
         // Tampered transcript rejected.
         let mut bad = init_v2.clone();
         bad.ephemeral_pub[0] ^= 0xff;
-        assert!(respond_verified(&bad, &responder_kp, &id_b, None).is_err());
+        assert!(respond_verified(&bad, &responder_kp, &id_b, None, id_b.device_id(0)).is_err());
+        // Device confusion rejected: attacker swaps the initiator device id
+        // post-signing (re-binding the session to another device).
+        let mut swapped = init_v2.clone();
+        swapped.device_id = id_a.device_id(7);
+        assert!(respond_verified(&swapped, &responder_kp, &id_b, None, id_b.device_id(0)).is_err());
+        // Responder device swap likewise breaks the initiator transcript.
+        let (initiator3, _) = HandshakeInitiator::initiate_verified(
+            &responder_kp.ek_bytes(),
+            &id_a,
+            id_a.device_id(0),
+        )
+        .unwrap();
+        let (mut resp3, _, _) =
+            respond_verified(&init_v2, &responder_kp, &id_b, None, id_b.device_id(0)).unwrap();
+        resp3.device_id = id_b.device_id(7);
+        assert!(initiator3.finalize_verified(&resp3, None).is_err());
         // Deniable responder rejects verified finalize (no vk/sig).
         let kp_tmp = KyberKeypair::generate();
         let (i_tmp, m_tmp) = HandshakeInitiator::initiate(&kp_tmp.ek_bytes()).unwrap();

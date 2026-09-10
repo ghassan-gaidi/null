@@ -314,11 +314,11 @@ async fn demo_loopback(
     let id_a = verified.then(IdentityKey::generate);
     let id_b = verified.then(IdentityKey::generate);
     let (init, init_msg) = match &id_a {
-        Some(id) => HandshakeInitiator::initiate_verified(&kp_b.ek_bytes(), id)?,
+        Some(id) => HandshakeInitiator::initiate_verified(&kp_b.ek_bytes(), id, id.device_id(0))?,
         None => HandshakeInitiator::initiate(&kp_b.ek_bytes())?,
     };
     let (resp, sess_b, _) = match &id_b {
-        Some(id) => respond_verified(&init_msg, &kp_b, id, None)?,
+        Some(id) => respond_verified(&init_msg, &kp_b, id, None, id.device_id(0))?,
         None => respond(&init_msg, &kp_b)?,
     };
     let sess_a = if verified {
@@ -341,6 +341,10 @@ async fn demo_loopback(
         if let Ok(qr) = null_identity::safety_number_qr_ascii(&sn) {
             eprintln!("[null] in-person scan code:\n{qr}");
         }
+        let mut kt = null_identity::TransparencyLog::new("loopback-peer");
+        kt.observe(&id_b.as_ref().unwrap().verifying_bytes())
+            .unwrap();
+        eprintln!("[null] transparency checkpoint: {}", kt.export_checkpoint());
     }
 
     let ad_ab = ad_for("alice.loopback", "bob.loopback");
@@ -580,7 +584,7 @@ async fn live_handshake(
     // Verified mode mints an ephemeral ML-DSA-65 identity for this session.
     let own_id = verified.then(null_crypto::identity::IdentityKey::generate);
     let (init, init_msg) = match &own_id {
-        Some(id) => HandshakeInitiator::initiate_verified(&ek_bytes, id)?,
+        Some(id) => HandshakeInitiator::initiate_verified(&ek_bytes, id, id.device_id(0))?,
         None => HandshakeInitiator::initiate(&ek_bytes)?,
     };
     for frame in pack_handshake_init(&init_msg)? {
@@ -622,6 +626,16 @@ async fn live_handshake(
         );
         if let Ok(qr) = null_identity::safety_number_qr_ascii(&sn) {
             eprintln!("[null] in-person scan code:\n{qr}");
+        }
+        // Transparency: record the attested peer key, export a checkpoint.
+        // A changed key fails closed here instead of continuing silently.
+        if let Some(vk) = resp.identity_vk.as_deref() {
+            let mut kt = null_identity::TransparencyLog::new(cs.onion_host.clone());
+            if let Err(e) = kt.observe(vk) {
+                eprintln!("[null] transparency failure: {e:#}; wiping");
+                secure_exit();
+            }
+            eprintln!("[null] transparency checkpoint: {}", kt.export_checkpoint());
         }
     }
 
@@ -736,7 +750,7 @@ async fn run_listener(
         }
     };
     let (resp, session, _) = match &own_id {
-        Some(id) => respond_verified(&init, &own_kp, id, None)?,
+        Some(id) => respond_verified(&init, &own_kp, id, None, id.device_id(0))?,
         None => respond(&init, &own_kp)?,
     };
     for frame in pack_handshake_response(&resp)? {
@@ -756,6 +770,14 @@ async fn run_listener(
         if let Ok(qr) = null_identity::safety_number_qr_ascii(&sn) {
             eprintln!("[null] in-person scan code:\n{qr}");
         }
+        let mut kt = null_identity::TransparencyLog::new("inbound-peer");
+        // Record the PEER key whose signature we just verified: any future
+        // change for this contact fails closed instead of continuing silently.
+        if let Err(e) = kt.observe(&peer_vk) {
+            eprintln!("[null] transparency failure: {e:#}; wiping");
+            secure_exit();
+        }
+        eprintln!("[null] transparency checkpoint: {}", kt.export_checkpoint());
     }
     let ad_out = ad_for_bytes(&own_kp.ek_bytes(), &init.kyber_ek);
     let ad_in = ad_for_bytes(&init.kyber_ek, &own_kp.ek_bytes());

@@ -883,6 +883,10 @@ impl Group {
     }
 
     /// Group message key for (epoch, sender, seq): HKDF(tree ‖ sender ‖ seq).
+    /// `sender` must be a roster member id: commit processing prunes
+    /// non-roster sender chains on recipients (the committer, which never
+    /// processes its own commits, retains them), so only roster-member
+    /// senders stay sequence-aligned across copies.
     pub fn message_key(&mut self, sender: &[u8; 32]) -> Result<[u8; 32]> {
         self.ensure_live()?;
         let seq = self.sender_chains.get(sender).copied().unwrap_or(0);
@@ -1051,6 +1055,69 @@ mod tests {
         // removing twice fails.
         assert!(a.remove(&[0x43; 32]).is_err());
         let _ = own_id;
+    }
+
+    #[test]
+    fn remove_then_update_converges() {
+        // Minimal repro shape: 3 members, remove one, then update.
+        // The updater's root and the recipient's adopted root must match.
+        let mut a = Group::create();
+        let (kp_b, dk_b) = real_kp(0x42);
+        let (kp_c, dk_c) = real_kp(0x43);
+        let (w_b, _c_b) = a.add(kp_b).unwrap();
+        let mut b = Group::join(&w_b, [0x42; 32], &dk_b).unwrap();
+        let (w_c, c_c) = a.add(kp_c).unwrap();
+        deliver(&mut a, &mut b, c_c);
+        let _c = Group::join(&w_c, [0x43; 32], &dk_c).unwrap();
+        let rm = a.remove(&[0x43; 32]).unwrap();
+        deliver(&mut a, &mut b, rm);
+        let upd = a.update().unwrap();
+        deliver(&mut a, &mut b, upd);
+    }
+
+    #[test]
+    fn remove_update_converge_4member() {
+        // Faithful replica of the session multidevice flow, incl. early
+        // message_key calls (sender-chain advancement must not affect
+        // tree-secret convergence).
+        let mut a = Group::create();
+        let mut members: Vec<([u8; 32], Group, KyberKeypair)> = Vec::new();
+        for i in [0xA1u8, 0xA2u8, 0xB0u8] {
+            let (kp, dk) = real_kp(i);
+            let id = [i; 32];
+            let (welcome, commit) = a.add(kp).unwrap();
+            for (_, g, _) in members.iter_mut() {
+                g.process_commit(&commit).unwrap();
+            }
+            members.push((id, Group::join(&welcome, id, &dk).unwrap(), dk));
+        }
+        // Early message_key use on every copy (as the session test does).
+        let sender = [0x77u8; 32];
+        let k0 = a.message_key(&sender).unwrap();
+        for (_, g, _) in members.iter_mut() {
+            assert_eq!(g.message_key(&sender).unwrap(), k0);
+        }
+        let rm = a.remove(&[0xA2u8; 32]).unwrap();
+        for (_, g, _) in members.iter_mut() {
+            if g.member_leaf.contains_key(&[0xA2u8; 32]) || g.info().epoch + 1 == a.info().epoch {
+                let _ = g.process_commit(&rm);
+            }
+        }
+        let upd = a.update().unwrap();
+        for (id, g, _) in members.iter_mut() {
+            if id[0] == 0xA2 {
+                continue;
+            }
+            g.process_commit(&upd).unwrap();
+        }
+        let probe = [0xABu8; 32];
+        let ka = a.message_key(&probe).unwrap();
+        for (id, g, _) in members.iter_mut() {
+            if id[0] == 0xA2 {
+                continue;
+            }
+            assert_eq!(g.message_key(&probe).unwrap(), ka);
+        }
     }
 
     #[test]

@@ -122,7 +122,8 @@ async fn tcp_verified_handshake_and_chat() {
                 _ => continue,
             }
         };
-        let (resp, mut sess_b, _) = respond_verified(&init, &kp_b, &id_b, None).unwrap();
+        let (resp, mut sess_b, _) =
+            respond_verified(&init, &kp_b, &id_b, None, id_b.device_id(0)).unwrap();
         for f in pack_handshake_response(&resp).unwrap() {
             c.send_blob(&f.encode()).await.unwrap();
         }
@@ -139,7 +140,8 @@ async fn tcp_verified_handshake_and_chat() {
     let id_a = IdentityKey::generate();
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
     let mut c = conn(stream);
-    let (init, init_msg) = HandshakeInitiator::initiate_verified(&ek_b, &id_a).unwrap();
+    let (init, init_msg) =
+        HandshakeInitiator::initiate_verified(&ek_b, &id_a, id_a.device_id(0)).unwrap();
     let own_vk = id_a.verifying_bytes();
     for f in pack_handshake_init(&init_msg).unwrap() {
         c.send_blob(&f.encode()).await.unwrap();

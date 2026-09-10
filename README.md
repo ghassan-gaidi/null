@@ -10,7 +10,7 @@ provides **Level 3 post-quantum messaging security**: ongoing post-quantum
 rekeying inside a continuous triple ratchet, multi-transport censorship
 resistance, and hardware-aware key isolation — all in a terminal-native app.
 
-Everything below is implemented and tested in this repository: 67 tests green,
+Everything below is implemented and tested in this repository: 89 tests green,
 `clippy -D warnings` clean, reproducible builds verified bit-identical, and
 live two-process chats (deniable, verified, TUI) proven over real sockets.
 
@@ -24,6 +24,9 @@ live two-process chats (deniable, verified, TUI) proven over real sockets.
 | Classical per-message ECDH ratchet + symmetric chain | ✅ | ✅-ish |
 | Out-of-order tolerant decryption (skipped-key cache) | ✅ | ✅-ish |
 | Deniable by default, opt-in ML-DSA-65 verified mode | ✅ | ❌ |
+| In-RAM key-transparency log, fail-closed on key change | ✅ | Rare |
+| Multi-device: bound transcripts, fan-out, device revocation | ✅ | ✅-ish |
+| Downgrade-attack matrix enforced by test (10 cases) | ✅ | Rare |
 | Multi-transport: Tor / I2P / Nym / Snowflake / WebTunnel / obfs4 | ✅ | ❌ |
 | Fixed 2048-byte frames + token-bucket shaping + dummy cover | ✅ | ❌ |
 | RAM-only, mlock, 3-pass panic wipe, no disk writes | ✅ | ❌ |
@@ -211,13 +214,15 @@ null://<56-char-onion>.onion?k=<base64 ML-KEM-1024 ek>&i=<ml-dsa:fingerprint>&t=
 
 ## Verification
 
-- **67 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
+- **89 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
   healing at message 51, lossless rekey-loss recovery, handshake codecs +
   fragmentation, TCP end-to-end (deniable *and* verified, incl.
   safety-number agreement), TreeKEM commits/openings/blanks, group
   Welcome/removal/fork-rejection, hybrid
   release signing, update gossip, TUI rendering + key routing, live-protocol
-  stub servers, HSM binding, evdev keymap.
+  stub servers, HSM binding, evdev keymap, key-transparency log,
+  downgrade-attack matrix, deniability tripwire, DeviceSet management,
+  3-process multi-device flow.
 - **Live proofs**: scripted two-process chats (deniable, verified with pinned
   fingerprints, graceful goodbye/drain shutdown) and automated pty-driven
   TUI tests (loopback and live listener). Quitting can no longer RST away a
@@ -250,6 +255,13 @@ Level-3-style ongoing rekeying · SLSA-style reproducible builds.
   *operations* need their native stacks (detection is implemented).
 
 ---
+
+## Design docs
+
+- `docs/deniability.md` — what deniable mode guarantees (and plainly does
+  not), enforced by a frame-level tripwire test.
+- `docs/multidevice.md` — one identity across N devices: transcript-bound
+  device ids, fan-out, group revocation, and stated limits.
 
 ## License
 

@@ -1006,6 +1006,7 @@ dependencies = [
  "null-core",
  "null-crypto",
  "null-frame",
+ "null-group",
  "null-identity",
  "null-transport",
  "tokio",
