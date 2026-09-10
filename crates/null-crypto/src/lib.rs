@@ -659,7 +659,7 @@ pub const RETAINED_REKEYS: usize = 8;
 
 impl Drop for Session {
     fn drop(&mut self) {
-        for (_, k) in self.skipped.iter_mut() {
+        for k in self.skipped.values_mut() {
             k.zeroize();
         }
         self.skipped.clear();
