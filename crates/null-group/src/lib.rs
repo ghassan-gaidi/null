@@ -111,10 +111,17 @@ impl Group {
 
     /// Accept a join (`Welcome`) or removal commit envelope sealed to our
     /// long-term Kyber dk. Adopts the new tree secret and epoch.
+    /// Stale or replayed epochs (≤ current) are rejected.
     pub fn apply_envelope(&mut self, env_bytes: &[u8], dk: &KyberKeypair) -> Result<()> {
         let env = CommitEnvelope::decode(env_bytes)?;
         if env.group_id != self.id {
             return Err(NullError::Group("envelope for another group".into()));
+        }
+        if env.epoch <= self.epoch {
+            return Err(NullError::Group(format!(
+                "stale envelope epoch {} (at {})",
+                env.epoch, self.epoch
+            )));
         }
         let k = dk
             .decapsulate(&env.ct)
@@ -386,6 +393,8 @@ mod tests {
         assert_eq!(a.tree_secret, b.tree_secret);
         assert_ne!(a.tree_secret, old_secret);
         assert_eq!(a.info().epoch, b.info().epoch);
+        // Replay of the same envelope is rejected (epoch guard).
+        assert!(b.apply_envelope(env, &dk_b).is_err());
         // Wrong-group envelope rejected.
         let mut other = Group::create();
         assert!(other.apply_envelope(env, &dk_b).is_err());

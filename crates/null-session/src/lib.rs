@@ -36,6 +36,14 @@ pub const HS_INIT_TAG: u8 = 0x01;
 pub const HS_RESPONSE_TAG: u8 = 0x02;
 /// Orderly shutdown notice (`Control` frame, empty payload).
 pub const GOODBYE_TAG: u8 = 0x10;
+/// Rekey replay request (`Control` frame, payload `from_gen` u64 BE):
+/// "re-send your rekey events newer than this generation".
+pub const REKEY_REQUEST_TAG: u8 = 0x11;
+/// Max buffered undecryptable messages awaiting a missed rekey.
+pub const MAX_PENDING: usize = 16;
+/// Consecutive unanswered rekey requests before declaring the session
+/// unrecoverable without a fresh handshake.
+pub const MAX_REKEY_ROUNDS: u32 = 3;
 /// Max handshake-blob bytes per frame; Kyber-1024 material (1568B ek + 1568B
 /// ct) cannot fit one 2048B frame, so inits fragment across two (§4.1).
 pub const HS_FRAG_MAX: usize = 1900;
@@ -197,7 +205,19 @@ pub fn pack_goodbye(counter: u64) -> anyhow::Result<Frame> {
         .map_err(|e| anyhow::anyhow!("goodbye frame: {e}"))
 }
 
+/// Pack a rekey replay request for generation `from_gen`.
+pub fn pack_rekey_request(counter: u64, from_gen: u64) -> anyhow::Result<Frame> {
+    let mut payload = vec![REKEY_REQUEST_TAG];
+    payload.extend_from_slice(&from_gen.to_be_bytes());
+    Frame::new(FrameType::Control, counter, payload)
+        .map_err(|e| anyhow::anyhow!("rekey request frame: {e}"))
+}
+
 /// Unpack one received 2048B frame. Handles rekey rotation transparently.
+///
+/// Generation mismatches surface as [`null_core::NullError::MissedRekey`]
+/// / `PeerBehind` (via `anyhow`) WITHOUT mutating session state — use
+/// [`Inbox`] for automatic buffering, requests, and retries.
 pub fn unpack_frame(session: &mut Session, raw: &[u8], ad: &[u8]) -> anyhow::Result<Unpacked> {
     let frame = Frame::decode(raw).map_err(|e| anyhow::anyhow!("frame decode: {e}"))?;
     if frame.frame_type == FrameType::Control && frame.payload.first() == Some(&GOODBYE_TAG) {
@@ -222,6 +242,140 @@ pub fn unpack_frame(session: &mut Session, raw: &[u8], ad: &[u8]) -> anyhow::Res
     }
 }
 
+/// Stateful receive endpoint with lossless rekey recovery.
+///
+/// Data frames that arrive ahead of their PQ rekey are buffered (bounded)
+/// while a `REKEY_REQUEST` goes out; each applied rekey retries the buffer.
+/// Data from a stale peer epoch is dropped with a notice while our retained
+/// rekeys are pushed to heal them. After [`MAX_REKEY_ROUNDS`] unanswered
+/// rounds the session is declared unrecoverable (fresh handshake needed).
+pub struct Inbox {
+    session: Session,
+    pending: std::collections::VecDeque<(EncryptedMessage, Vec<u8>)>,
+    request_rounds: u32,
+}
+
+impl Inbox {
+    pub fn new(session: Session) -> Self {
+        Self {
+            session,
+            pending: std::collections::VecDeque::new(),
+            request_rounds: 0,
+        }
+    }
+
+    pub fn session_mut(&mut self) -> &mut Session {
+        &mut self.session
+    }
+
+    pub fn pending_len(&self) -> usize {
+        self.pending.len()
+    }
+
+    /// Feed one raw 2048B frame. `outbound` frames must be transmitted in
+    /// order (rekey replays / requests); `texts` holds all newly readable
+    /// plaintexts; `notice` carries operator-visible drop/heal events.
+    pub fn receive(&mut self, raw: &[u8], ad: &[u8]) -> anyhow::Result<InboxOut> {
+        let frame = Frame::decode(raw).map_err(|e| anyhow::anyhow!("frame decode: {e}"))?;
+        let mut out = InboxOut::default();
+        match frame.frame_type {
+            FrameType::Dummy => {}
+            FrameType::Control => {
+                if frame.payload.first() == Some(&GOODBYE_TAG) {
+                    out.goodbye = true;
+                } else if frame.payload.first() == Some(&REKEY_REQUEST_TAG) {
+                    if frame.payload.len() != 9 {
+                        return Err(anyhow::anyhow!("malformed rekey request"));
+                    }
+                    let from = u64::from_be_bytes(frame.payload[1..9].try_into().unwrap());
+                    for (_, ct) in self.session.rekey_events_since(from) {
+                        out.outbound.push(
+                            Frame::new(FrameType::KyberRekey, self.session.send_counter(), ct)
+                                .map_err(|e| anyhow::anyhow!("rekey replay: {e}"))?,
+                        );
+                    }
+                }
+            }
+            FrameType::KyberRekey => {
+                self.session
+                    .kyber_rekey_receive(&frame.payload)
+                    .map_err(|e| anyhow::anyhow!("rekey receive: {e}"))?;
+                self.request_rounds = 0;
+                self.retry_pending(&mut out);
+            }
+            FrameType::Data => {
+                let msg = EncryptedMessage::decode(&frame.payload)
+                    .map_err(|e| anyhow::anyhow!("message decode: {e}"))?;
+                match self.session.decrypt(&msg, ad) {
+                    Ok(pt) => {
+                        self.request_rounds = 0;
+                        out.texts.push(pt);
+                    }
+                    Err(null_core::NullError::MissedRekey { have, .. }) => {
+                        if self.pending.len() >= MAX_PENDING {
+                            self.pending.pop_front();
+                            out.notice = Some("dropped oldest buffered message (overflow)".into());
+                        }
+                        self.pending.push_back((msg, ad.to_vec()));
+                        self.request_rounds += 1;
+                        if self.request_rounds > MAX_REKEY_ROUNDS {
+                            return Err(anyhow::anyhow!(
+                                "PQ resync impossible after {MAX_REKEY_ROUNDS} rounds: re-handshake required"
+                            ));
+                        }
+                        out.outbound.push(
+                            pack_rekey_request(self.session.send_counter(), have)
+                                .map_err(|e| anyhow::anyhow!("request pack: {e}"))?,
+                        );
+                        out.notice = Some(format!(
+                            "missed PQ rekey (have gen {have}): buffered, requested replay"
+                        ));
+                    }
+                    Err(null_core::NullError::PeerBehind { have, want }) => {
+                        // Peer is behind: push our retained rekeys so their
+                        // FUTURE messages decrypt. This stale message itself
+                        // used an abandoned root and cannot be recovered.
+                        for (_, ct) in self.session.rekey_events_since(want) {
+                            out.outbound.push(
+                                Frame::new(FrameType::KyberRekey, self.session.send_counter(), ct)
+                                    .map_err(|e| anyhow::anyhow!("rekey push: {e}"))?,
+                            );
+                        }
+                        out.notice = Some(format!(
+                            "dropped message from stale PQ epoch (peer gen {want}, ours {have})"
+                        ));
+                    }
+                    Err(e) => return Err(anyhow::anyhow!("decrypt: {e}")),
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Try buffered messages again (each carries the AD it arrived with).
+    fn retry_pending(&mut self, out: &mut InboxOut) {
+        let mut still_pending = std::collections::VecDeque::new();
+        while let Some((msg, ad)) = self.pending.pop_front() {
+            match self.session.decrypt(&msg, &ad) {
+                Ok(pt) => out.texts.push(pt),
+                Err(_) => still_pending.push_back((msg, ad)),
+            }
+        }
+        self.pending = still_pending;
+        if self.pending.is_empty() {
+            self.request_rounds = 0;
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct InboxOut {
+    pub texts: Vec<Vec<u8>>,
+    pub outbound: Vec<Frame>,
+    pub goodbye: bool,
+    pub notice: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -234,6 +388,95 @@ mod tests {
         let (resp, sess_b, _) = respond(&init_msg, &kp_b).unwrap();
         let sess_a = init.finalize(&resp).unwrap();
         (sess_a, sess_b)
+    }
+
+    fn inbox_pair() -> (Inbox, Inbox) {
+        let (a, b) = handshake_pair();
+        (Inbox::new(a), Inbox::new(b))
+    }
+
+    #[test]
+    fn inbox_recovers_lost_rekey_losslessly() {
+        let (mut ia, mut ib) = inbox_pair();
+        let ad = ad_for("alice", "bob");
+        // A advances two PQ generations WITHOUT transmitting the rekey
+        // frames (simulating loss), then sends one Data frame.
+        ia.session_mut().kyber_rekey_initiate().unwrap(); // gen 0→1
+        ia.session_mut().kyber_rekey_initiate().unwrap(); // gen 1→2
+        let frames = pack_data(ia.session_mut(), b"lost rekey msg", &ad).unwrap();
+        assert_eq!(frames.len(), 1, "Data only; rekey frames were lost");
+        // B is at gen 0. Deliver Data(gen2) only.
+        let data_raw = frames[0].encode();
+        let out = ib.receive(&data_raw, &ad).unwrap();
+        assert!(out.texts.is_empty(), "nothing decryptable yet");
+        assert_eq!(ib.pending_len(), 1, "message buffered");
+        assert_eq!(out.outbound.len(), 1, "rekey request emitted");
+        assert!(out.notice.unwrap().contains("missed PQ rekey"));
+        // A answers the request with retained replays (gen 1 AND 2).
+        let req_raw = out.outbound[0].encode();
+        let ans = ia.receive(&req_raw, &ad).unwrap();
+        assert!(ans.texts.is_empty());
+        assert_eq!(ans.outbound.len(), 2, "both missed rekeys replayed");
+        // B applies replays in order; the buffered message decrypts.
+        let mut healed_texts = Vec::new();
+        for f in &ans.outbound {
+            let r = ib.receive(&f.encode(), &ad).unwrap();
+            healed_texts.extend(r.texts);
+        }
+        assert_eq!(healed_texts.len(), 1);
+        assert_eq!(healed_texts[0], b"lost rekey msg");
+        assert_eq!(ib.pending_len(), 0);
+        assert_eq!(
+            ia.session_mut().kyber_generation(),
+            ib.session_mut().kyber_generation()
+        );
+    }
+
+    #[test]
+    fn inbox_pushes_rekeys_to_stale_peer() {
+        let (mut ia, mut ib) = inbox_pair();
+        let ad = ad_for("alice", "bob");
+        // A advances two generations alone (rekeys never transmitted).
+        ia.session_mut().kyber_rekey_initiate().unwrap();
+        ia.session_mut().kyber_rekey_initiate().unwrap();
+        // B (gen 0) sends data; A (gen 2) sees a stale epoch: drops the
+        // message but pushes both retained rekeys so B heals forward.
+        let frames = pack_data(ib.session_mut(), b"stale hello", &ad).unwrap();
+        let out = ia.receive(&frames[0].encode(), &ad).unwrap();
+        assert!(out.texts.is_empty());
+        assert_eq!(out.outbound.len(), 2, "both generations pushed");
+        assert!(out.notice.unwrap().contains("stale PQ epoch"));
+        // B applies the pushes and converges.
+        for f in &out.outbound {
+            let r = ib.receive(&f.encode(), &ad).unwrap();
+            assert!(r.texts.is_empty());
+        }
+        assert_eq!(
+            ia.session_mut().kyber_generation(),
+            ib.session_mut().kyber_generation()
+        );
+        // Conversation resumes on the healed root.
+        let frames = pack_data(ib.session_mut(), b"healed hi", &ad).unwrap();
+        let out = ia.receive(&frames[0].encode(), &ad).unwrap();
+        assert_eq!(out.texts.len(), 1);
+        assert_eq!(out.texts[0], b"healed hi");
+    }
+
+    #[test]
+    fn inbox_gives_up_after_max_rounds() {
+        let (mut ia, mut ib) = inbox_pair();
+        let ad = ad_for("alice", "bob");
+        ia.session_mut().kyber_rekey_initiate().unwrap();
+        let frames = pack_data(ia.session_mut(), b"x", &ad).unwrap();
+        let raw = frames[0].encode();
+        // Answer requests with silence (drop outbound): rounds accumulate.
+        for _ in 0..=MAX_REKEY_ROUNDS {
+            if let Err(e) = ib.receive(&raw, &ad) {
+                assert!(format!("{e:?}").contains("re-handshake"));
+                return;
+            }
+        }
+        panic!("should have declared the session unrecoverable");
     }
 
     /// Drive one packed message from `a` to `b` through full 2048B frames.

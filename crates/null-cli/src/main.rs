@@ -36,6 +36,10 @@ struct Args {
     /// Auto-lock seconds (default 30 min idle per §8.4 dead-man baseline).
     #[arg(long, default_value_t = 30 * 60)]
     auto_lock_secs: u64,
+    /// Dead man's switch: panic-wipe keys and exit after N idle seconds
+    /// (§8.4). 0 disables (default); distinct from auto-lock above.
+    #[arg(long, default_value_t = 0)]
+    dead_man_secs: u64,
     /// Panic-wipe when a new /dev node appears (unknown USB insertion, §8.4).
     #[arg(long)]
     usbguard: bool,
@@ -102,6 +106,8 @@ async fn main() -> Result<()> {
             args.verified,
             args.auto_lock_secs,
             args.secure_input,
+            args.dead_man_secs,
+            args.tui,
         )
         .await?;
         secure_exit();
@@ -118,9 +124,21 @@ async fn main() -> Result<()> {
     if let Some(peer) = args.peer.as_deref() {
         if peer == "loopback" {
             if args.tui {
-                tui_loopback(args.safe, args.verified, args.auto_lock_secs).await?;
+                tui_loopback(
+                    args.safe,
+                    args.verified,
+                    args.auto_lock_secs,
+                    args.dead_man_secs,
+                )
+                .await?;
             } else {
-                demo_loopback(args.safe, args.verified, args.auto_lock_secs).await?;
+                demo_loopback(
+                    args.safe,
+                    args.verified,
+                    args.auto_lock_secs,
+                    args.dead_man_secs,
+                )
+                .await?;
             }
             secure_exit();
         }
@@ -164,6 +182,8 @@ async fn main() -> Result<()> {
                 args.verified,
                 args.auto_lock_secs,
                 args.secure_input,
+                args.dead_man_secs,
+                args.tui,
             )
             .await
             {
@@ -218,15 +238,68 @@ async fn main() -> Result<()> {
     secure_exit()
 }
 
+/// Drive loopback traffic until both directions are quiescent (bounded):
+/// deliver queued raws into inboxes, route outbound replies back.
+/// Returns collected `(a_texts, b_texts)`. Exercises the same recovery
+/// path (rekey requests/replays) as live peers.
+async fn exchange_loopback(
+    a_end: &mut null_transport::LoopbackHandle,
+    b_end: &mut null_transport::LoopbackHandle,
+    ia: &mut null_session::Inbox,
+    ib: &mut null_session::Inbox,
+    ad_ab: &[u8],
+    ad_ba: &[u8],
+) -> Result<(Vec<Vec<u8>>, Vec<Vec<u8>>)> {
+    let mut a_texts = Vec::new();
+    let mut b_texts = Vec::new();
+    for _ in 0..8 {
+        let mut moved = false;
+        while let Ok(raw) = b_end.try_recv_raw() {
+            moved = true;
+            let out = ib.receive(&raw, ad_ab)?;
+            if let Some(n) = out.notice {
+                eprintln!("[null] resync: {n}");
+            }
+            b_texts.extend(out.texts);
+            for f in &out.outbound {
+                a_end.send_raw(f.encode()).unwrap();
+            }
+        }
+        while let Ok(raw) = a_end.try_recv_raw() {
+            moved = true;
+            let out = ia.receive(&raw, ad_ba)?;
+            if let Some(n) = out.notice {
+                eprintln!("[null] resync: {n}");
+            }
+            a_texts.extend(out.texts);
+            for f in &out.outbound {
+                b_end.send_raw(f.encode()).unwrap();
+            }
+        }
+        if !moved {
+            break;
+        }
+    }
+    Ok((a_texts, b_texts))
+}
+
 /// Self-contained E2E demo over an in-memory loopback circuit: real
 /// handshake → ratchet → 2048B frames → shaper → transport → decrypt,
 /// then an interactive self-chat REPL. No daemons required.
-async fn demo_loopback(decoy: bool, verified: bool, auto_lock_secs: u64) -> Result<()> {
+///
+/// All traffic flows through [`null_session::Inbox`] on both ends, so rekey
+/// replays and requests exercise the same recovery path as live peers.
+async fn demo_loopback(
+    decoy: bool,
+    verified: bool,
+    auto_lock_secs: u64,
+    dead_man_secs: u64,
+) -> Result<()> {
     use null_crypto::{
-        identity::IdentityKey, respond, respond_verified, HandshakeInitiator, KyberKeypair, Session,
+        identity::IdentityKey, respond, respond_verified, HandshakeInitiator, KyberKeypair,
     };
     use null_frame::TrafficShaper;
-    use null_session::{ad_for, pack_data, unpack_frame, Unpacked};
+    use null_session::{ad_for, pack_data, Inbox};
     use null_transport::loopback_pair;
     use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -244,16 +317,18 @@ async fn demo_loopback(decoy: bool, verified: bool, auto_lock_secs: u64) -> Resu
         Some(id) => HandshakeInitiator::initiate_verified(&kp_b.ek_bytes(), id)?,
         None => HandshakeInitiator::initiate(&kp_b.ek_bytes())?,
     };
-    let (resp, mut sess_b, _) = match &id_b {
+    let (resp, sess_b, _) = match &id_b {
         Some(id) => respond_verified(&init_msg, &kp_b, id, None)?,
         None => respond(&init_msg, &kp_b)?,
     };
-    let mut sess_a: Session = if verified {
+    let sess_a = if verified {
         let fp_b = id_b.as_ref().unwrap().fingerprint();
         init.finalize_verified(&resp, Some(&fp_b))?
     } else {
         init.finalize(&resp)?
     };
+    let mut ia = Inbox::new(sess_a);
+    let mut ib = Inbox::new(sess_b);
     eprintln!("[null] handshake complete (3DH deniable + ML-KEM-1024)");
 
     if verified {
@@ -263,6 +338,9 @@ async fn demo_loopback(decoy: bool, verified: bool, auto_lock_secs: u64) -> Resu
             b"loopback-demo",
         );
         eprintln!("[null] safety number: {sn}");
+        if let Ok(qr) = null_identity::safety_number_qr_ascii(&sn) {
+            eprintln!("[null] in-person scan code:\n{qr}");
+        }
     }
 
     let ad_ab = ad_for("alice.loopback", "bob.loopback");
@@ -271,7 +349,7 @@ async fn demo_loopback(decoy: bool, verified: bool, auto_lock_secs: u64) -> Resu
     let mut shaper = TrafficShaper::new();
 
     // One scripted ping-pong through the full wire path first.
-    for f in pack_data(&mut sess_a, b"ping", &ad_ab)? {
+    for f in pack_data(ia.session_mut(), b"ping", &ad_ab)? {
         if shaper.try_consume() {
             a_end.send_raw(f.encode()).unwrap();
         } else {
@@ -279,18 +357,18 @@ async fn demo_loopback(decoy: bool, verified: bool, auto_lock_secs: u64) -> Resu
             a_end.send_raw(f.encode()).unwrap();
         }
     }
-    let raw = b_end.recv_raw().await?;
-    match unpack_frame(&mut sess_b, &raw, &ad_ab)? {
-        Unpacked::Text(pt) => eprintln!("[bob] {}", String::from_utf8_lossy(&pt)),
-        Unpacked::NoText | Unpacked::Goodbye => {}
+    let (_, b_texts) =
+        exchange_loopback(&mut a_end, &mut b_end, &mut ia, &mut ib, &ad_ab, &ad_ba).await?;
+    for pt in &b_texts {
+        eprintln!("[bob] {}", String::from_utf8_lossy(pt));
     }
-    for f in pack_data(&mut sess_b, b"pong", &ad_ba)? {
+    for f in pack_data(ib.session_mut(), b"pong", &ad_ba)? {
         b_end.send_raw(f.encode()).unwrap();
     }
-    let raw = a_end.recv_raw().await?;
-    match unpack_frame(&mut sess_a, &raw, &ad_ba)? {
-        Unpacked::Text(pt) => eprintln!("[alice] {}", String::from_utf8_lossy(&pt)),
-        Unpacked::NoText | Unpacked::Goodbye => {}
+    let (a_texts, _) =
+        exchange_loopback(&mut a_end, &mut b_end, &mut ia, &mut ib, &ad_ab, &ad_ba).await?;
+    for pt in &a_texts {
+        eprintln!("[alice] {}", String::from_utf8_lossy(pt));
     }
 
     eprintln!("[null] type lines to send (self-chat echoes decrypt); /quit exits.");
@@ -304,7 +382,11 @@ async fn demo_loopback(decoy: bool, verified: bool, auto_lock_secs: u64) -> Resu
         tokio::select! {
             _ = tokio::signal::ctrl_c() => secure_exit(),
             _ = tick.tick() => {
-                // Dead man's switch (§8.4): idle lock.
+                if dead_man_secs > 0 && last_activity.elapsed().as_secs() >= dead_man_secs {
+                    eprintln!("[null] dead man's switch: {dead_man_secs}s idle — wiping");
+                    secure_exit();
+                }
+                // Idle lock (§8.4).
                 if !locked && last_activity.elapsed().as_secs() >= auto_lock_secs {
                     locked = true;
                     eprintln!("[null] auto-locked after {auto_lock_secs}s idle — /unlock to resume");
@@ -348,20 +430,19 @@ async fn demo_loopback(decoy: bool, verified: bool, auto_lock_secs: u64) -> Resu
                     continue;
                 }
                 // Shaped send: burst then jittered delay (§6.2).
-                for f in pack_data(&mut sess_a, cmd.as_bytes(), &ad_ab)? {
+                for f in pack_data(ia.session_mut(), cmd.as_bytes(), &ad_ab)? {
                     if !shaper.try_consume() {
                         tokio::time::sleep(TrafficShaper::next_delay()).await;
                     }
                     a_end.send_raw(f.encode()).unwrap();
-                    // Loopback echo: what B would decrypt on the wire.
-                    let raw = b_end.recv_raw().await?;
-                    match unpack_frame(&mut sess_b, &raw, &ad_ab)? {
-                        Unpacked::Text(pt) => {
-                            last_peer_text = String::from_utf8_lossy(&pt).into_owned();
-                            eprintln!("[bob] {last_peer_text}")
-                        }
-                        Unpacked::NoText | Unpacked::Goodbye => {}
-                    }
+                }
+                // Loopback echo: what B decrypts on the wire (with recovery).
+                let (_, b_texts) =
+                    exchange_loopback(&mut a_end, &mut b_end, &mut ia, &mut ib, &ad_ab, &ad_ba)
+                        .await?;
+                for pt in &b_texts {
+                    last_peer_text = String::from_utf8_lossy(pt).into_owned();
+                    eprintln!("[bob] {last_peer_text}");
                 }
             }
         }
@@ -371,25 +452,33 @@ async fn demo_loopback(decoy: bool, verified: bool, auto_lock_secs: u64) -> Resu
 /// Full-screen Ratatui chat over a loopback triple-ratchet session.
 /// Same pipeline as live peers (handshake → frames → shaper → decrypt);
 /// the "network" is an in-memory circuit. Demo PIN is 1234, duress 0000.
-async fn tui_loopback(decoy: bool, verified: bool, auto_lock_secs: u64) -> Result<()> {
+async fn tui_loopback(
+    decoy: bool,
+    verified: bool,
+    auto_lock_secs: u64,
+    dead_man_secs: u64,
+) -> Result<()> {
     use crossterm::{
         event::{self, Event},
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     };
-    use null_crypto::{respond, HandshakeInitiator, KyberKeypair, Session};
+    use null_crypto::{respond, HandshakeInitiator, KyberKeypair};
     use null_frame::TrafficShaper;
-    use null_session::{ad_for, pack_data, unpack_frame, Unpacked};
+    use null_session::{ad_for, pack_data, Inbox};
     use null_transport::loopback_pair;
     use null_tui::{App, AppAction};
     use ratatui::{backend::CrosstermBackend, Terminal};
 
     let kp_b = KyberKeypair::generate();
     let (init, init_msg) = HandshakeInitiator::initiate(&kp_b.ek_bytes())?;
-    let (resp, mut sess_b, _) = respond(&init_msg, &kp_b)?;
-    let mut sess_a: Session = init.finalize(&resp)?;
+    let (resp, sess_b, _) = respond(&init_msg, &kp_b)?;
+    let sess_a = init.finalize(&resp)?;
+    let mut ia = Inbox::new(sess_a);
+    let mut ib = Inbox::new(sess_b);
     let ad_ab = ad_for("alice.loopback", "bob.loopback");
-    let (a_end, mut b_end) = loopback_pair();
+    let ad_ba = ad_for("bob.loopback", "alice.loopback");
+    let (mut a_end, mut b_end) = loopback_pair();
     let mut shaper = TrafficShaper::new();
 
     let mut app = App::new(
@@ -400,18 +489,19 @@ async fn tui_loopback(decoy: bool, verified: bool, auto_lock_secs: u64) -> Resul
     );
     if verified {
         app.set_safety(null_identity::safety_number(
-            &sess_a.kyber_ek_bytes(),
-            &sess_b.kyber_ek_bytes(),
+            &ia.session_mut().kyber_ek_bytes(),
+            &ib.session_mut().kyber_ek_bytes(),
             b"loopback-demo",
         ));
     }
-    // Scripted hello through the wire path.
-    for f in pack_data(&mut sess_a, b"ping", &ad_ab)? {
+    // Scripted hello through the wire path (with recovery).
+    for f in pack_data(ia.session_mut(), b"ping", &ad_ab)? {
         a_end.send_raw(f.encode()).unwrap();
-        let raw = b_end.recv_raw().await?;
-        if let Unpacked::Text(pt) = unpack_frame(&mut sess_b, &raw, &ad_ab)? {
-            app.push_message("bob", &String::from_utf8_lossy(&pt));
-        }
+    }
+    let (_, b_texts) =
+        exchange_loopback(&mut a_end, &mut b_end, &mut ia, &mut ib, &ad_ab, &ad_ba).await?;
+    for pt in &b_texts {
+        app.push_message("bob", &String::from_utf8_lossy(pt));
     }
     app.push_message("sys", "session up — Enter sends, /quit exits");
 
@@ -426,6 +516,11 @@ async fn tui_loopback(decoy: bool, verified: bool, auto_lock_secs: u64) -> Resul
 
     loop {
         app.poll_auto_lock();
+        if dead_man_secs > 0 && app.tui.last_activity.elapsed().as_secs() >= dead_man_secs {
+            restore(&mut term);
+            eprintln!("[null] dead man's switch: {dead_man_secs}s idle — wiping");
+            secure_exit();
+        }
         term.draw(|f| app.render(f))?;
         if event::poll(std::time::Duration::from_millis(100))? {
             if let Event::Key(key) = event::read()? {
@@ -441,16 +536,19 @@ async fn tui_loopback(decoy: bool, verified: bool, auto_lock_secs: u64) -> Resul
                         app.set_notice("copied; clears in 5s");
                     }
                     AppAction::Send(cmd) => {
-                        for f in pack_data(&mut sess_a, cmd.as_bytes(), &ad_ab)? {
+                        for f in pack_data(ia.session_mut(), cmd.as_bytes(), &ad_ab)? {
                             if !shaper.try_consume() {
                                 tokio::time::sleep(TrafficShaper::next_delay()).await;
                             }
                             a_end.send_raw(f.encode()).unwrap();
-                            let raw = b_end.recv_raw().await?;
-                            if let Unpacked::Text(pt) = unpack_frame(&mut sess_b, &raw, &ad_ab)? {
-                                app.push_message("you", &cmd);
-                                app.push_message("bob", &String::from_utf8_lossy(&pt));
-                            }
+                        }
+                        let (_, b_texts) = exchange_loopback(
+                            &mut a_end, &mut b_end, &mut ia, &mut ib, &ad_ab, &ad_ba,
+                        )
+                        .await?;
+                        for pt in &b_texts {
+                            app.push_message("you", &cmd);
+                            app.push_message("bob", &String::from_utf8_lossy(pt));
                         }
                     }
                 }
@@ -469,6 +567,8 @@ async fn live_handshake(
     verified: bool,
     auto_lock_secs: u64,
     secure: bool,
+    dead_man_secs: u64,
+    tui: bool,
 ) -> Result<()> {
     use base64::Engine;
     use null_crypto::HandshakeInitiator;
@@ -520,16 +620,51 @@ async fn live_handshake(
                 None => " (TOFU: no i= fingerprint in peer string!)".to_string(),
             }
         );
+        if let Ok(qr) = null_identity::safety_number_qr_ascii(&sn) {
+            eprintln!("[null] in-person scan code:\n{qr}");
+        }
     }
 
     let ad_out = ad_for_bytes(&session.kyber_ek_bytes(), &ek_bytes);
     let ad_in = ad_for_bytes(&ek_bytes, &session.kyber_ek_bytes());
-    chat_loop(session, conn, &ad_out, &ad_in, auto_lock_secs, secure).await
+    if tui {
+        if secure {
+            eprintln!("[null] WARN: --tui owns the keyboard; ignoring --secure-input");
+        }
+        let mut app = null_tui::App::new(
+            cs.onion_host.clone(),
+            conn.kind.to_string(),
+            false,
+            auto_lock_secs,
+        );
+        if verified {
+            let peer_vk = resp.identity_vk.as_deref().unwrap_or(ek_bytes.as_slice());
+            app.set_safety(null_identity::safety_number(
+                &own_id.as_ref().unwrap().verifying_bytes(),
+                peer_vk,
+                cs.onion_host.as_bytes(),
+            ));
+        }
+        chat_loop_tui(session, conn, &ad_out, &ad_in, dead_man_secs, app).await
+    } else {
+        chat_loop(
+            session,
+            conn,
+            &ad_out,
+            &ad_in,
+            auto_lock_secs,
+            secure,
+            dead_man_secs,
+        )
+        .await
+    }
 }
 
 /// Responder mode (§12 discovery, inbound side): bind loopback, optionally
 /// provision our onion, serve one handshake, then chat. Prints the
-/// `null://` string the initiator needs.
+/// `null://` string the initiator needs. Eight scalar knobs would trip the
+/// arg-count lint, so they stay grouped by role in the signature below.
+#[allow(clippy::too_many_arguments)]
 async fn run_listener(
     port: u16,
     control_port: u16,
@@ -537,6 +672,8 @@ async fn run_listener(
     verified: bool,
     auto_lock_secs: u64,
     secure: bool,
+    dead_man_secs: u64,
+    tui: bool,
 ) -> Result<()> {
     use base64::Engine;
     use null_crypto::{respond, respond_verified, KyberKeypair};
@@ -616,26 +753,65 @@ async fn run_listener(
             .unwrap_or_else(|| init.kyber_ek.clone());
         let sn = null_identity::safety_number(&own_vk, &peer_vk, onion_host.as_bytes());
         eprintln!("[null] safety number: {sn} — confirm out-of-band");
+        if let Ok(qr) = null_identity::safety_number_qr_ascii(&sn) {
+            eprintln!("[null] in-person scan code:\n{qr}");
+        }
     }
     let ad_out = ad_for_bytes(&own_kp.ek_bytes(), &init.kyber_ek);
     let ad_in = ad_for_bytes(&init.kyber_ek, &own_kp.ek_bytes());
-    chat_loop(session, conn, &ad_out, &ad_in, auto_lock_secs, secure).await
+    if tui {
+        let mut app = null_tui::App::new(
+            "inbound".into(),
+            conn.kind.to_string(),
+            false,
+            auto_lock_secs,
+        );
+        if verified {
+            let own_vk = own_id.as_ref().unwrap().verifying_bytes();
+            let peer_vk = init
+                .identity_vk
+                .clone()
+                .unwrap_or_else(|| init.kyber_ek.clone());
+            app.set_safety(null_identity::safety_number(
+                &own_vk,
+                &peer_vk,
+                onion_host.as_bytes(),
+            ));
+        }
+        chat_loop_tui(session, conn, &ad_out, &ad_in, dead_man_secs, app).await
+    } else {
+        chat_loop(
+            session,
+            conn,
+            &ad_out,
+            &ad_in,
+            auto_lock_secs,
+            secure,
+            dead_man_secs,
+        )
+        .await
+    }
 }
 
 /// Shaped send/receive loop shared by initiator and responder sessions.
 ///
 /// Line input arrives over one channel fed by stdin and — when `secure` and
 /// available (root + evdev) — by the grabbed-keyboard reader (§8.3).
+/// Reception runs through [`null_session::Inbox`] so lost PQ rekeys heal
+/// automatically instead of wedging the session.
 async fn chat_loop(
-    mut session: null_crypto::Session,
+    session: null_crypto::Session,
     mut conn: null_transport::TransportConn,
     ad_out: &[u8],
     ad_in: &[u8],
     auto_lock_secs: u64,
     secure: bool,
+    dead_man_secs: u64,
 ) -> Result<()> {
     use null_frame::TrafficShaper;
-    use null_session::{pack_data, unpack_frame, Unpacked};
+    use null_session::{pack_data, Inbox};
+
+    let mut inbox = Inbox::new(session);
 
     let mut shaper = TrafficShaper::new();
     let mut locked = false;
@@ -676,13 +852,18 @@ async fn chat_loop(
         tokio::select! {
             _ = tokio::signal::ctrl_c() => secure_exit(),
             _ = tick.tick() => {
+                if dead_man_secs > 0 && last_activity.elapsed().as_secs() >= dead_man_secs {
+                    eprintln!("[null] dead man's switch: {dead_man_secs}s idle — wiping");
+                    secure_exit();
+                }
                 if !locked && last_activity.elapsed().as_secs() >= auto_lock_secs {
                     locked = true;
                     eprintln!("[null] auto-locked after {auto_lock_secs}s idle — /unlock to resume");
                 }
                 // Idle cover traffic: indistinguishable dummy frame (§6.3).
                 if shaper.try_consume() {
-                    let dummy = null_frame::Frame::dummy(session.send_counter());
+                    let dummy =
+                        null_frame::Frame::dummy(inbox.session_mut().send_counter());
                     let _ = conn.send_blob(&dummy.encode()).await;
                 }
             }
@@ -694,33 +875,37 @@ async fn chat_loop(
                         // the kernel first (recv_blob drains the buffer), so
                         // reaching here means the peer is truly gone.
                         eprintln!("[null] peer disconnected — wiping");
-                        drain_inbound(&mut conn, &mut session, ad_in).await;
+                        drain_inbound(&mut conn, &mut inbox, ad_in).await;
                         secure_exit();
                     }
                 };
-                match unpack_frame(&mut session, &raw, ad_in)? {
-                    Unpacked::Text(pt) => {
-                        last_activity = std::time::Instant::now();
-                        last_peer_text = String::from_utf8_lossy(&pt).into_owned();
-                        eprintln!("[peer] {last_peer_text}");
-                    }
-                    Unpacked::Goodbye => {
-                        eprintln!("[peer] left — wiping");
-                        drain_inbound(&mut conn, &mut session, ad_in).await;
-                        secure_exit();
-                    }
-                    Unpacked::NoText => {}
+                let out = inbox.receive(&raw, ad_in)?;
+                if let Some(n) = out.notice {
+                    eprintln!("[null] resync: {n}");
+                }
+                for f in &out.outbound {
+                    conn.send_blob(&f.encode()).await?;
+                }
+                for pt in &out.texts {
+                    last_activity = std::time::Instant::now();
+                    last_peer_text = String::from_utf8_lossy(pt).into_owned();
+                    eprintln!("[peer] {last_peer_text}");
+                }
+                if out.goodbye {
+                    eprintln!("[peer] left — wiping");
+                    drain_inbound(&mut conn, &mut inbox, ad_in).await;
+                    secure_exit();
                 }
             }
             line = async { rx.recv().await } => {
                 let Some(line) = line.flatten() else {
-                    graceful_quit(&mut conn, &mut session, ad_in).await;
+                    graceful_quit(&mut conn, &mut inbox, ad_in).await;
                     secure_exit()
                 };
                 last_activity = std::time::Instant::now();
                 let cmd = line.trim();
                 if cmd == "/quit" {
-                    graceful_quit(&mut conn, &mut session, ad_in).await;
+                    graceful_quit(&mut conn, &mut inbox, ad_in).await;
                     secure_exit();
                 }
                 if cmd == "/lock" {
@@ -748,7 +933,7 @@ async fn chat_loop(
                     }
                     continue;
                 }
-                for f in pack_data(&mut session, cmd.as_bytes(), ad_out)? {
+                for f in pack_data(inbox.session_mut(), cmd.as_bytes(), ad_out)? {
                     if !shaper.try_consume() {
                         tokio::time::sleep(TrafficShaper::next_delay()).await;
                     }
@@ -765,23 +950,22 @@ async fn chat_loop(
 /// queued bytes) — the goodbye's counterpart.
 async fn graceful_quit(
     conn: &mut null_transport::TransportConn,
-    session: &mut null_crypto::Session,
+    inbox: &mut null_session::Inbox,
     ad_in: &[u8],
 ) {
     use null_session::pack_goodbye;
-    if let Ok(frame) = pack_goodbye(session.send_counter()) {
+    if let Ok(frame) = pack_goodbye(inbox.session_mut().send_counter()) {
         let _ = conn.send_blob(&frame.encode()).await;
     }
-    drain_inbound(conn, session, ad_in).await;
+    drain_inbound(conn, inbox, ad_in).await;
 }
 
 /// Read inbound for up to ~2s, printing texts (peer goodbye included).
 async fn drain_inbound(
     conn: &mut null_transport::TransportConn,
-    session: &mut null_crypto::Session,
+    inbox: &mut null_session::Inbox,
     ad_in: &[u8],
 ) {
-    use null_session::{unpack_frame, Unpacked};
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -789,14 +973,125 @@ async fn drain_inbound(
             break;
         }
         match tokio::time::timeout(remaining, conn.recv_blob()).await {
-            Ok(Ok(raw)) => match unpack_frame(session, &raw, ad_in) {
-                Ok(Unpacked::Text(pt)) => {
-                    eprintln!("[peer] {}", String::from_utf8_lossy(&pt));
+            Ok(Ok(raw)) => match inbox.receive(&raw, ad_in) {
+                Ok(out) => {
+                    for pt in &out.texts {
+                        eprintln!("[peer] {}", String::from_utf8_lossy(pt));
+                    }
                 }
-                Ok(Unpacked::Goodbye) | Ok(Unpacked::NoText) => {}
                 Err(_) => break,
             },
             _ => break,
+        }
+    }
+}
+
+/// Full-screen Ratatui variant of [`chat_loop`] for live sessions.
+/// Same pipeline (shaped sends, [`Inbox`] recovery, goodbye/drain); input
+/// comes from crossterm key events routed through [`null_tui::App`].
+async fn chat_loop_tui(
+    session: null_crypto::Session,
+    mut conn: null_transport::TransportConn,
+    ad_out: &[u8],
+    ad_in: &[u8],
+    dead_man_secs: u64,
+    mut app: null_tui::App,
+) -> Result<()> {
+    use crossterm::{
+        event::{self, Event},
+        execute,
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    };
+    use null_frame::TrafficShaper;
+    use null_session::{pack_data, Inbox};
+    use null_tui::AppAction;
+    use ratatui::{backend::CrosstermBackend, Terminal};
+
+    let mut inbox = Inbox::new(session);
+    let mut shaper = TrafficShaper::new();
+    enable_raw_mode()?;
+    let mut stdout = std::io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let mut term = Terminal::new(CrosstermBackend::new(stdout))?;
+    let restore = |term: &mut Terminal<CrosstermBackend<std::io::Stdout>>| {
+        let _ = disable_raw_mode();
+        let _ = execute!(term.backend_mut(), LeaveAlternateScreen);
+    };
+    app.push_message("sys", "session up — Enter sends, Esc quits");
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(100));
+    loop {
+        app.poll_auto_lock();
+        if dead_man_secs > 0 && app.tui.last_activity.elapsed().as_secs() >= dead_man_secs {
+            restore(&mut term);
+            eprintln!("[null] dead man's switch: {dead_man_secs}s idle — wiping");
+            secure_exit();
+        }
+        term.draw(|f| app.render(f))?;
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                restore(&mut term);
+                secure_exit();
+            }
+            _ = tick.tick() => {
+                if shaper.try_consume() {
+                    let dummy =
+                        null_frame::Frame::dummy(inbox.session_mut().send_counter());
+                    let _ = conn.send_blob(&dummy.encode()).await;
+                }
+                while event::poll(std::time::Duration::from_millis(0))? {
+                    let Event::Key(key) = event::read()? else { continue };
+                    match app.handle_key(key.code, key.modifiers) {
+                        AppAction::None => {}
+                        AppAction::Quit => {
+                            restore(&mut term);
+                            return Ok(());
+                        }
+                        AppAction::Wipe => {
+                            restore(&mut term);
+                            secure_exit();
+                        }
+                        AppAction::Copy(text) => {
+                            null_tui::clipboard_copy_and_schedule_clear(&text);
+                            app.set_notice("copied; clears in 5s");
+                        }
+                        AppAction::Send(text) => {
+                            for f in pack_data(inbox.session_mut(), text.as_bytes(), ad_out)? {
+                                if !shaper.try_consume() {
+                                    tokio::time::sleep(TrafficShaper::next_delay()).await;
+                                }
+                                conn.send_blob(&f.encode()).await?;
+                            }
+                        }
+                    }
+                }
+            }
+            inbound = conn.recv_blob() => {
+                let raw = match inbound {
+                    Ok(raw) => raw,
+                    Err(_) => {
+                        restore(&mut term);
+                        eprintln!("[null] peer disconnected — wiping");
+                        drain_inbound(&mut conn, &mut inbox, ad_in).await;
+                        secure_exit();
+                    }
+                };
+                let out = inbox.receive(&raw, ad_in)?;
+                if let Some(n) = out.notice {
+                    app.set_notice(format!("resync: {n}"));
+                }
+                for f in &out.outbound {
+                    conn.send_blob(&f.encode()).await?;
+                }
+                for pt in &out.texts {
+                    app.push_message("peer", &String::from_utf8_lossy(pt));
+                }
+                if out.goodbye {
+                    restore(&mut term);
+                    eprintln!("[peer] left — wiping");
+                    drain_inbound(&mut conn, &mut inbox, ad_in).await;
+                    secure_exit();
+                }
+            }
         }
     }
 }

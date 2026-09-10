@@ -636,6 +636,13 @@ pub struct Session {
     kyber_longterm: KyberKeypair,
     /// Peer's long-term Kyber ek (encap target for our rekeys).
     peer_kyber_ek: Vec<u8>,
+    /// PQ rekey generation: incremented on every root mix (initiate or
+    /// receive). Carried on each message so loss is detectable.
+    kyber_generation: u64,
+    /// Recent rekeys WE initiated: (generation, ct, shared secret), newest
+    /// last, capped — replayed on REKEY_REQUEST so a peer that lost our
+    /// rekey frames can still heal without re-handshaking.
+    retained_rekeys: std::collections::VecDeque<(u64, Vec<u8>, Vec<u8>)>,
     /// Cached chain keys for skipped counters (out-of-order delivery).
     /// Bounded by MAX_SKIP; wiped on drop.
     skipped: HashMap<u64, [u8; 48]>,
@@ -647,12 +654,19 @@ pub struct Session {
 /// Max forward jump / cached keys for out-of-order frames.
 pub const MAX_SKIP: u64 = 200;
 
+/// How many initiated rekeys are retained for loss recovery.
+pub const RETAINED_REKEYS: usize = 8;
+
 impl Drop for Session {
     fn drop(&mut self) {
         for (_, k) in self.skipped.iter_mut() {
             k.zeroize();
         }
         self.skipped.clear();
+        for (_, _, k) in self.retained_rekeys.iter_mut() {
+            k.zeroize();
+        }
+        self.retained_rekeys.clear();
     }
 }
 
@@ -686,6 +700,8 @@ impl Session {
             peer_ecdh_pub: Some(peer_pub),
             kyber_longterm,
             peer_kyber_ek,
+            kyber_generation: 0,
+            retained_rekeys: std::collections::VecDeque::new(),
             skipped: HashMap::new(),
             last_kyber_rekey: Instant::now(),
             created_at: Instant::now(),
@@ -716,6 +732,8 @@ impl Session {
             peer_ecdh_pub: None,
             kyber_longterm: kp,
             peer_kyber_ek: peer_ek,
+            kyber_generation: 0,
+            retained_rekeys: std::collections::VecDeque::new(),
             skipped: HashMap::new(),
             last_kyber_rekey: Instant::now(),
             created_at: Instant::now(),
@@ -733,6 +751,21 @@ impl Session {
         self.kyber_longterm.ek_bytes()
     }
 
+    /// Current PQ rekey generation (see field docs).
+    pub fn kyber_generation(&self) -> u64 {
+        self.kyber_generation
+    }
+
+    /// Retained rekey events newer than `gen`: `(generation, ct)` pairs for
+    /// REKEY_REQUEST replays, oldest first.
+    pub fn rekey_events_since(&self, gen: u64) -> Vec<(u64, Vec<u8>)> {
+        self.retained_rekeys
+            .iter()
+            .filter(|(g, _, _)| *g > gen)
+            .map(|(g, ct, _)| (*g, ct.clone()))
+            .collect()
+    }
+
     /// Peer's long-term Kyber ek (our rekey encap target).
     pub fn peer_kyber_ek(&self) -> &[u8] {
         &self.peer_kyber_ek
@@ -746,9 +779,17 @@ impl Session {
     /// Periodic Kyber re-encapsulation sub-ratchet (§4.2 steps 1-5).
     /// Encapsulates to the peer's long-term ek stored at handshake time.
     /// Returns the `ct` blob to transmit alongside the next message.
+    /// The event is retained (bounded) for REKEY_REQUEST replays.
     pub fn kyber_rekey_initiate(&mut self) -> Result<Vec<u8>> {
         let (ct, k_new) = kyber_encap_to(&self.peer_kyber_ek.clone())?;
         self.mix_kyber_shared(&k_new);
+        self.retained_rekeys
+            .push_back((self.kyber_generation, ct.clone(), k_new));
+        while self.retained_rekeys.len() > RETAINED_REKEYS {
+            if let Some((_, _, mut k)) = self.retained_rekeys.pop_front() {
+                k.zeroize();
+            }
+        }
         self.secrets.msgs_since_kyber = 0;
         self.last_kyber_rekey = Instant::now();
         Ok(ct)
@@ -773,6 +814,7 @@ impl Session {
         let okm = hkdf_sha384(&ikm, &[0u8; 48], b"kyber-ratchet", 48);
         self.secrets.root_key.copy_from_slice(&okm);
         self.secrets.kyber_shared = k_new.to_vec();
+        self.kyber_generation += 1;
     }
 
     fn ecdh_shared_or_zero(&self) -> [u8; 32] {
@@ -834,6 +876,7 @@ impl Session {
     /// Rotate-before-send: fresh ephemeral is generated FIRST so the DH
     /// contribution `DH(new_secret, peer_pub)` matches what the receiver
     /// computes as `DH(own_secret, new_pub)`. The new pub is sent on-wire.
+    /// The current PQ generation rides along for loss detection.
     pub fn encrypt(&mut self, plaintext: &[u8], ad: &[u8]) -> Result<EncryptedMessage> {
         // ECDH ratchet: fresh ephemeral for every message (classical PCS).
         self.ecdh_ratchet = EphemeralKey::generate();
@@ -847,6 +890,7 @@ impl Session {
             .map_err(|e| NullError::Crypto(format!("aead encrypt: {e}")))?;
         let msg = EncryptedMessage {
             counter,
+            kyber_gen: self.kyber_generation,
             ecdh_pub: self.ecdh_ratchet.public_bytes(),
             ciphertext: buf,
         };
@@ -866,7 +910,24 @@ impl Session {
     /// decrypt only if we have not rotated our ECDH secret since (i.e. we
     /// have not sent anything after the jump) — documented limitation of
     /// per-message DH rotation.
+    ///
+    /// PQ generation is checked BEFORE any state mutates: a newer generation
+    /// means we lost rekey frames ([`NullError::MissedRekey`], request a
+    /// replay and retry later); an older one means the peer is behind
+    /// ([`NullError::PeerBehind`], push our retained rekeys to them).
     pub fn decrypt(&mut self, msg: &EncryptedMessage, ad: &[u8]) -> Result<Vec<u8>> {
+        if msg.kyber_gen > self.kyber_generation {
+            return Err(NullError::MissedRekey {
+                have: self.kyber_generation,
+                want: msg.kyber_gen,
+            });
+        }
+        if msg.kyber_gen < self.kyber_generation {
+            return Err(NullError::PeerBehind {
+                have: self.kyber_generation,
+                want: msg.kyber_gen,
+            });
+        }
         // ECDH ratchet: adopt sender's new pub BEFORE deriving the message
         // key, so DH(own_secret, new_pub) == DH(sender_new_secret, own_pub).
         self.peer_ecdh_pub = Some(msg.ecdh_pub);
@@ -918,38 +979,42 @@ impl Session {
 
 /// Wire form of one ratchet message (embedded in a 2048B frame).
 ///
-/// Encoding: `counter(8 BE) ‖ ecdh_pub(32) ‖ ciphertext`.
+/// Encoding: `counter(8 BE) ‖ kyber_gen(8 BE) ‖ ecdh_pub(32) ‖ ciphertext`.
 /// Decoding rejects trailing garbage so frame-padding bugs surface loudly.
 #[derive(Debug, Clone)]
 pub struct EncryptedMessage {
     pub counter: u64,
+    pub kyber_gen: u64,
     pub ecdh_pub: [u8; 32],
     pub ciphertext: Vec<u8>,
 }
 
 impl EncryptedMessage {
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(40 + self.ciphertext.len());
+        let mut out = Vec::with_capacity(48 + self.ciphertext.len());
         out.extend_from_slice(&self.counter.to_be_bytes());
+        out.extend_from_slice(&self.kyber_gen.to_be_bytes());
         out.extend_from_slice(&self.ecdh_pub);
         out.extend_from_slice(&self.ciphertext);
         out
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 40 {
+        if bytes.len() < 48 {
             return Err(NullError::Crypto(format!(
                 "ratchet message too short: {}",
                 bytes.len()
             )));
         }
         let counter = u64::from_be_bytes(bytes[0..8].try_into().unwrap());
+        let kyber_gen = u64::from_be_bytes(bytes[8..16].try_into().unwrap());
         let mut ecdh_pub = [0u8; 32];
-        ecdh_pub.copy_from_slice(&bytes[8..40]);
+        ecdh_pub.copy_from_slice(&bytes[16..48]);
         Ok(Self {
             counter,
+            kyber_gen,
             ecdh_pub,
-            ciphertext: bytes[40..].to_vec(),
+            ciphertext: bytes[48..].to_vec(),
         })
     }
 }
@@ -1018,6 +1083,38 @@ mod tests {
     }
 
     #[test]
+    fn generation_tracks_rekeys_and_gates_decrypt() {
+        let responder_kp = KyberKeypair::generate();
+        let (initiator, init) = HandshakeInitiator::initiate(&responder_kp.ek_bytes()).unwrap();
+        let (resp, mut sess_b, _k) = respond(&init, &responder_kp).unwrap();
+        let mut sess_a = initiator.finalize(&resp).unwrap();
+        assert_eq!(
+            (sess_a.kyber_generation(), sess_b.kyber_generation()),
+            (0, 0)
+        );
+        let ad = b"g";
+        // A rekeys alone: its messages now carry gen 1.
+        let ct = sess_a.kyber_rekey_initiate().unwrap();
+        assert_eq!(sess_a.kyber_generation(), 1);
+        assert_eq!(sess_a.rekey_events_since(0).len(), 1);
+        assert!(sess_a.rekey_events_since(1).is_empty());
+        let m = sess_a.encrypt(b"new epoch", ad).unwrap();
+        assert_eq!(m.kyber_gen, 1);
+        // B is behind: detectable before any state mutates.
+        let err = sess_b.decrypt(&m, ad).unwrap_err();
+        assert!(matches!(err, NullError::MissedRekey { have: 0, want: 1 }));
+        // B heals from the ct, then decrypts.
+        sess_b.kyber_rekey_receive(&ct).unwrap();
+        assert_eq!(sess_b.kyber_generation(), 1);
+        assert_eq!(sess_b.decrypt(&m, ad).unwrap(), b"new epoch");
+        // Stale-generation message against a healed session: peer-behind.
+        let mut stale = m.clone();
+        stale.kyber_gen = 0;
+        let err = sess_b.decrypt(&stale, ad).unwrap_err();
+        assert!(matches!(err, NullError::PeerBehind { have: 1, want: 0 }));
+    }
+
+    #[test]
     fn kyber_rekey_mixes_root() {
         let root = [7u8; 48];
         let (mut a, mut _b) = Session::new_deterministic_for_test(root);
@@ -1058,13 +1155,15 @@ mod tests {
     fn message_wire_codec_roundtrip() {
         let m = EncryptedMessage {
             counter: 42,
+            kyber_gen: 7,
             ecdh_pub: [9u8; 32],
             ciphertext: b"ciphertext-bytes".to_vec(),
         };
         let bytes = m.encode();
-        assert_eq!(bytes.len(), 40 + b"ciphertext-bytes".len());
+        assert_eq!(bytes.len(), 48 + b"ciphertext-bytes".len());
         let back = EncryptedMessage::decode(&bytes).unwrap();
         assert_eq!(back.counter, 42);
+        assert_eq!(back.kyber_gen, 7);
         assert_eq!(back.ecdh_pub, [9u8; 32]);
         assert_eq!(back.ciphertext, b"ciphertext-bytes");
         assert!(EncryptedMessage::decode(&bytes[..10]).is_err());

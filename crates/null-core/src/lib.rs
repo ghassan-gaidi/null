@@ -51,6 +51,10 @@ pub enum NullError {
     Io(String),
     #[error("invalid connection string: {0}")]
     ConnectionString(String),
+    #[error("missed PQ rekey: have generation {have}, message needs {want}")]
+    MissedRekey { have: u64, want: u64 },
+    #[error("peer behind our PQ rekey: have generation {have}, message at {want}")]
+    PeerBehind { have: u64, want: u64 },
     #[error("version downgrade: got {got}, expected >= {min}")]
     Downgrade { got: u64, min: u64 },
 }

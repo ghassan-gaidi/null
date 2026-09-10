@@ -607,6 +607,12 @@ impl LoopbackHandle {
             .await
             .ok_or_else(|| NullError::Transport("loopback closed".into()))
     }
+
+    pub fn try_recv_raw(&mut self) -> Result<Vec<u8>> {
+        self.rx
+            .try_recv()
+            .map_err(|_| NullError::Transport("loopback empty".into()))
+    }
 }
 
 /// Connected loopback pair: everything `a` sends arrives at `b` and vice versa.

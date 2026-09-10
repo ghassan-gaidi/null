@@ -10,9 +10,9 @@ provides **Level 3 post-quantum messaging security**: ongoing post-quantum
 rekeying inside a continuous triple ratchet, multi-transport censorship
 resistance, and hardware-aware key isolation — all in a terminal-native app.
 
-Everything below is implemented and tested in this repository: 54 tests green,
+Everything below is implemented and tested in this repository: 58 tests green,
 `clippy -D warnings` clean, reproducible builds verified bit-identical, and
-live two-process chats proven over real sockets.
+live two-process chats (deniable, verified, TUI) proven over real sockets.
 
 ---
 
@@ -84,10 +84,14 @@ Null is designed to resist:
   1 message, quantum healing at the next Kyber rekey.
 - **Out-of-order delivery**: skipped chain-key cache (window 200, wiped on
   drop); replays and oversized gaps rejected.
+- **Rekey loss recovery**: every message carries its PQ generation counter.
+  A receiver that missed rekey frames buffers the message, requests a replay,
+  and the initiator re-sends retained rekeys — lossless within the retention
+  window; beyond it the session honestly reports that re-handshaking is needed.
 - **Verified mode** (`--verified`): mutual ML-DSA-65 signatures over the
   handshake transcript, fingerprint pinning via the `i=` parameter
-  (`ml-dsa:<sha3-256(vk)>`), and a canonical 12×5-digit safety number that
-  matches on both sides for out-of-band confirmation.
+  (`ml-dsa:<sha3-256(vk)>`), and a canonical 12×5-digit safety number (plus
+  scannable QR) that matches on both sides for out-of-band confirmation.
 
 ### Transports — censorship resistance
 
@@ -160,6 +164,8 @@ cargo build --locked --bin null
 ./target/debug/null --listen 18080
 # Terminal 2 (add --verified on both for mutual authentication):
 NULL_DIRECT_ADDR=127.0.0.1:18080 ./target/debug/null --peer 'null://…'
+# ...or with a full-screen UI on either side:
+./target/debug/null --listen 18080 --tui
 ```
 
 Over real Tor, front the listener's port with an onion service
@@ -183,14 +189,15 @@ null://<56-char-onion>.onion?k=<base64 ML-KEM-1024 ek>&i=<ml-dsa:fingerprint>&t=
 ```
 --peer <null://…|loopback>   peer to dial (omit to idle)
 --listen <PORT>              responder mode on 127.0.0.1:PORT
---verified                   ML-DSA-65 mutual auth + safety number
+--verified                   ML-DSA-65 mutual auth + safety number + QR
 --deniable                   (default) strip all signature material
---tui                        full-screen Ratatui interface (loopback)
+--tui                        full-screen Ratatui interface (loopback or live)
 --transports <list>          priority order (default tor,i2p,nym)
 --control-port <PORT>        provision ephemeral onion via Tor control
 --secure-input               evdev keystroke reading (needs root)
 --usbguard                   panic-wipe on new /dev nodes
 --auto-lock-secs <N>         idle lock (default 1800)
+--dead-man-secs <N>          idle wipe + exit, 0 disables (default 0)
 --safe                       decoy IRC-like interface
 --hsm <software|check>       local-secret backend / hardware probe
 ```
@@ -199,13 +206,15 @@ null://<56-char-onion>.onion?k=<base64 ML-KEM-1024 ek>&i=<ml-dsa:fingerprint>&t=
 
 ## Verification
 
-- **54 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
-  healing at message 51, handshake codecs + fragmentation, TCP end-to-end
-  (deniable *and* verified, incl. safety-number agreement), group
-  Welcome/removal, update gossip, TUI rendering + key routing, live-protocol
-  stub servers, HSM binding.
+- **58 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
+  healing at message 51, lossless rekey-loss recovery, handshake codecs +
+  fragmentation, TCP end-to-end (deniable *and* verified, incl.
+  safety-number agreement), group Welcome/removal, update gossip, TUI
+  rendering + key routing, live-protocol stub servers, HSM binding.
 - **Live proofs**: scripted two-process chats (deniable, verified with pinned
-  fingerprints, graceful shutdown) and an automated pty-driven TUI test.
+  fingerprints, graceful goodbye/drain shutdown) and automated pty-driven
+  TUI tests (loopback and live listener). Quitting can no longer RST away a
+  peer's in-flight messages.
 - **Reproducibility**: `cargo run -p xtask -- repro` builds twice and
   compares hashes (verified identical).
 - **Gates**: `cargo fmt --check`, `cargo clippy --locked --all-targets
