@@ -10,7 +10,7 @@ provides **Level 3 post-quantum messaging security**: ongoing post-quantum
 rekeying inside a continuous triple ratchet, multi-transport censorship
 resistance, and hardware-aware key isolation — all in a terminal-native app.
 
-Everything below is implemented and tested in this repository: 58 tests green,
+Everything below is implemented and tested in this repository: 60 tests green,
 `clippy -D warnings` clean, reproducible builds verified bit-identical, and
 live two-process chats (deniable, verified, TUI) proven over real sockets.
 
@@ -132,13 +132,16 @@ including in live chats.
 ### Groups (Null-MLS)
 
 Tree-secret evolution with PQ KeyPackages: Kyber-sealed `Welcome` envelopes
-for joiners and per-member commit envelopes on removal (true PCS — the
-removed member cannot open the new epoch). Up to 50,000 members.
+for joiners (with roster sync) and per-member commit envelopes on removal
+(true PCS — the removed member cannot open the new epoch). Epochs hash-chain
+(`prev_hash`), so forks, gaps, and replays are rejected, never silently
+accepted. Up to 50,000 members.
 
 ### Updates
 
 Ed25519-signed manifests (monotonic version, binary + lockfile hashes,
-reserved SPHINCS+ slot, downgrade rejection) distributed over onion fetches
+real SLH-DSA-SHA2-128s + Ed25519 hybrid signatures, downgrade rejection)
+distributed over onion fetches
 and signature-checked P2P gossip where newest-verified wins.
 
 ---
@@ -206,11 +209,12 @@ null://<56-char-onion>.onion?k=<base64 ML-KEM-1024 ek>&i=<ml-dsa:fingerprint>&t=
 
 ## Verification
 
-- **58 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
+- **60 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
   healing at message 51, lossless rekey-loss recovery, handshake codecs +
   fragmentation, TCP end-to-end (deniable *and* verified, incl.
-  safety-number agreement), group Welcome/removal, update gossip, TUI
-  rendering + key routing, live-protocol stub servers, HSM binding.
+  safety-number agreement), group Welcome/removal/fork-rejection, hybrid
+  release signing, update gossip, TUI rendering + key routing, live-protocol
+  stub servers, HSM binding, evdev keymap.
 - **Live proofs**: scripted two-process chats (deniable, verified with pinned
   fingerprints, graceful goodbye/drain shutdown) and automated pty-driven
   TUI tests (loopback and live listener). Quitting can no longer RST away a
@@ -223,18 +227,18 @@ null://<56-char-onion>.onion?k=<base64 ML-KEM-1024 ek>&i=<ml-dsa:fingerprint>&t=
 ### Standards mapping
 
 NIST FIPS 203 (ML-KEM-1024) · FIPS 204 (ML-DSA-65) · FIPS 205 slot reserved
-(SPHINCS+) · MLS-inspired group commits (RFC 9420 family) · Apple PQ3
+(SLH-DSA-SHA2-128s, verified) · MLS-inspired group commits (RFC 9420 family) · Apple PQ3
 Level-3-style ongoing rekeying · SLSA-style reproducible builds.
 
 ---
 
 ## Limitations & roadmap
 
-- Formal protocol models (Tamarin/ProVerif) and audit harnesses
-  (miri, dudect, fuzzing) are the next track, not yet in-tree.
+- Formal protocol models (Tamarin/ProVerif) and nightly-only harnesses
+  (miri, cargo-fuzz) are the next track. A deterministic stable fuzz corpus
+  (`cargo xtask fuzz`, wired into CI) covers every wire decoder today.
 - Group commits are O(n) re-encapsulations rather than O(log n) TreeKEM
   path secrets — fine for typical groups, not yet 50k-optimal.
-- SPHINCS+ release signing is a length-checked reserved slot.
 - Bridge transports need operator-provided sidecars/bridges.
 - Secure Enclave support is macOS-gated scaffolding; TPM/YubiKey key
   *operations* need their native stacks (detection is implemented).

@@ -29,6 +29,9 @@ pub struct GroupInfo {
     pub epoch: u64,
 }
 
+/// One commit envelope per recipient: `(member_id, envelope_bytes)`.
+pub type MemberCommits = Vec<([u8; 32], Vec<u8>)>;
+
 pub struct Group {
     id: [u8; 32],
     epoch: u64,
@@ -92,18 +95,20 @@ impl Group {
     /// cannot open any envelope. Returns `(member_id, envelope_bytes)` pairs.
     /// The caller transmits them; recipients call [`Group::apply_envelope`].
     /// Our own secret/epoch advance immediately.
-    pub fn remove_member_commit(&mut self, id: &[u8; 32]) -> Result<Vec<([u8; 32], Vec<u8>)>> {
+    pub fn remove_member_commit(&mut self, id: &[u8; 32]) -> Result<MemberCommits> {
         if self.members.remove(id).is_none() {
             return Err(NullError::Group("unknown member".into()));
         }
         self.sender_chains.remove(id);
+        let prev = epoch_hash(&self.tree_secret, self.epoch);
         let mut fresh = [0u8; 48];
         OsRng.fill_bytes(&mut fresh);
         self.tree_secret = fresh;
         self.epoch += 1;
+        let roster = roster_ids(&self.members);
         let mut out = Vec::new();
         for (mid, kp) in &self.members {
-            let env = seal_tree_secret(&self.id, self.epoch, &fresh, &kp.kyber_ek)?;
+            let env = seal_tree_secret(&self.id, self.epoch, &prev, &roster, &fresh, &kp.kyber_ek)?;
             out.push((*mid, env.encode()));
         }
         Ok(out)
@@ -111,7 +116,9 @@ impl Group {
 
     /// Accept a join (`Welcome`) or removal commit envelope sealed to our
     /// long-term Kyber dk. Adopts the new tree secret and epoch.
-    /// Stale or replayed epochs (≤ current) are rejected.
+    /// Stale or replayed epochs (≤ current) are rejected, as are commits
+    /// whose `prev_hash` does not chain to our current epoch secret —
+    /// that means a fork or a missed commit, never silently accepted.
     pub fn apply_envelope(&mut self, env_bytes: &[u8], dk: &KyberKeypair) -> Result<()> {
         let env = CommitEnvelope::decode(env_bytes)?;
         if env.group_id != self.id {
@@ -123,46 +130,141 @@ impl Group {
                 env.epoch, self.epoch
             )));
         }
+        if env.prev_hash != epoch_hash(&self.tree_secret, self.epoch) {
+            return Err(NullError::Group(
+                "commit does not chain to current epoch (fork or gap)".into(),
+            ));
+        }
         let k = dk
             .decapsulate(&env.ct)
             .map_err(|e| NullError::Group(format!("welcome decap: {e}")))?;
         let secret = open_tree_secret_in(&env.group_id, env.epoch, &k, &env.sealed)?;
         self.tree_secret = secret;
         self.epoch = env.epoch;
+        self.sync_roster(&env.roster);
         Ok(())
     }
 
     /// Add a member with a real `Welcome`: evolve the tree, then seal the
     /// NEW secret to the joiner's KeyPackage ek. Insert locally and return
     /// the envelope bytes for the joiner (see [`Group::join`]).
+    ///
+    /// NOTE: existing members do NOT learn the new epoch from this call —
+    /// use [`Group::add_member_commit`] when they must stay in sync.
     pub fn prepare_welcome(&mut self, kp: KeyPackage) -> Result<Vec<u8>> {
         if self.members.len() >= MAX_GROUP_MEMBERS {
             return Err(NullError::Group("group full (50k)".into()));
         }
-        self.evolve_tree(b"add");
-        let env = seal_tree_secret(&self.id, self.epoch, &self.tree_secret, &kp.kyber_ek)?;
         self.members.insert(kp.member_id, kp.clone());
         self.sender_chains.insert(kp.member_id, 0);
+        let prev = epoch_hash(&self.tree_secret, self.epoch);
+        self.evolve_tree(b"add");
+        let roster = roster_ids(&self.members);
+        let env = seal_tree_secret(
+            &self.id,
+            self.epoch,
+            &prev,
+            &roster,
+            &self.tree_secret,
+            &kp.kyber_ek,
+        )?;
         Ok(env.encode())
+    }
+
+    /// Add a member AND keep existing members in sync: returns the joiner's
+    /// `Welcome` plus one commit envelope per pre-existing member, all at
+    /// the new epoch and chaining to the previous one. Recipients apply
+    /// their envelope via [`Group::apply_envelope`].
+    pub fn add_member_commit(&mut self, kp: KeyPackage) -> Result<(Vec<u8>, MemberCommits)> {
+        if self.members.len() >= MAX_GROUP_MEMBERS {
+            return Err(NullError::Group("group full (50k)".into()));
+        }
+        let prev = epoch_hash(&self.tree_secret, self.epoch);
+        self.evolve_tree(b"add");
+        let mut roster = roster_ids(&self.members);
+        roster.push(kp.member_id);
+        roster.sort_unstable();
+        let mut commits = Vec::new();
+        for (mid, existing) in &self.members {
+            let env = seal_tree_secret(
+                &self.id,
+                self.epoch,
+                &prev,
+                &roster,
+                &self.tree_secret,
+                &existing.kyber_ek,
+            )?;
+            commits.push((*mid, env.encode()));
+        }
+        let welcome = seal_tree_secret(
+            &self.id,
+            self.epoch,
+            &prev,
+            &roster,
+            &self.tree_secret,
+            &kp.kyber_ek,
+        )?
+        .encode();
+        self.members.insert(kp.member_id, kp.clone());
+        self.sender_chains.insert(kp.member_id, 0);
+        Ok((welcome, commits))
     }
 
     /// Join a group from a `Welcome` envelope: decapsulate with our
     /// long-term Kyber dk and adopt the tree secret at the envelope epoch.
+    /// The roster arrives with the Welcome (TOFU, like the secret itself);
+    /// peers learned this way carry placeholder KeyPackages until their real
+    /// KeyPackages arrive out-of-band.
     pub fn join(env_bytes: &[u8], member_id: [u8; 32], dk: &KyberKeypair) -> Result<Self> {
         let env = CommitEnvelope::decode(env_bytes)?;
         let k = dk
             .decapsulate(&env.ct)
             .map_err(|e| NullError::Group(format!("welcome decap: {e}")))?;
         let secret = open_tree_secret_in(&env.group_id, env.epoch, &k, &env.sealed)?;
+        let mut members = HashMap::new();
         let mut sender_chains = HashMap::new();
+        for id in &env.roster {
+            members.insert(
+                *id,
+                KeyPackage {
+                    member_id: *id,
+                    kyber_ek: Vec::new(),
+                    signature_hint: None,
+                },
+            );
+            sender_chains.insert(*id, 0);
+        }
         sender_chains.insert(member_id, 0);
         Ok(Self {
             id: env.group_id,
             epoch: env.epoch,
             tree_secret: secret,
-            members: HashMap::new(),
+            members,
             sender_chains,
         })
+    }
+
+    /// Replace the roster with the envelope's, preserving stored KeyPackages
+    /// (with real eks) for members we already know.
+    fn sync_roster(&mut self, roster: &[[u8; 32]]) {
+        let mut next = HashMap::new();
+        for id in roster {
+            if let Some(kp) = self.members.remove(id) {
+                next.insert(*id, kp);
+            } else {
+                next.insert(
+                    *id,
+                    KeyPackage {
+                        member_id: *id,
+                        kyber_ek: Vec::new(),
+                        signature_hint: None,
+                    },
+                );
+                self.sender_chains.entry(*id).or_insert(0);
+            }
+        }
+        self.sender_chains.retain(|id, _| roster.contains(id));
+        self.members = next;
     }
 
     /// Group message key for (epoch, sender, seq): HKDF(tree ‖ sender ‖ seq).
@@ -205,15 +307,26 @@ impl Drop for Group {
 pub struct CommitEnvelope {
     pub group_id: [u8; 32],
     pub epoch: u64,
+    /// `SHA3-256(prev_secret ‖ prev_epoch)`: commits chain epochs so forks
+    /// and gaps are detectable by existing members.
+    pub prev_hash: [u8; 32],
+    /// Member IDs at the new epoch (post-add/remove).
+    pub roster: Vec<[u8; 32]>,
     pub ct: Vec<u8>,
     pub sealed: Vec<u8>,
 }
 
 impl CommitEnvelope {
     pub fn encode(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(44 + self.ct.len() + self.sealed.len());
+        let mut out =
+            Vec::with_capacity(80 + 32 * self.roster.len() + self.ct.len() + self.sealed.len());
         out.extend_from_slice(&self.group_id);
         out.extend_from_slice(&self.epoch.to_be_bytes());
+        out.extend_from_slice(&self.prev_hash);
+        out.extend_from_slice(&(self.roster.len() as u32).to_be_bytes());
+        for id in &self.roster {
+            out.extend_from_slice(id);
+        }
         out.extend_from_slice(&(self.ct.len() as u32).to_be_bytes());
         out.extend_from_slice(&self.ct);
         out.extend_from_slice(&self.sealed);
@@ -221,23 +334,58 @@ impl CommitEnvelope {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        if bytes.len() < 44 {
+        if bytes.len() < 76 {
             return Err(NullError::Group("envelope too short".into()));
         }
         let mut group_id = [0u8; 32];
         group_id.copy_from_slice(&bytes[..32]);
         let epoch = u64::from_be_bytes(bytes[32..40].try_into().unwrap());
-        let ct_len = u32::from_be_bytes(bytes[40..44].try_into().unwrap()) as usize;
-        if bytes.len() < 44 + ct_len {
+        let mut prev_hash = [0u8; 32];
+        prev_hash.copy_from_slice(&bytes[40..72]);
+        let roster_len = u32::from_be_bytes(bytes[72..76].try_into().unwrap()) as usize;
+        if roster_len > MAX_GROUP_MEMBERS {
+            return Err(NullError::Group("roster too large".into()));
+        }
+        let mut at = 76 + 32 * roster_len;
+        if bytes.len() < at + 4 {
+            return Err(NullError::Group("envelope roster overrun".into()));
+        }
+        let mut roster = Vec::with_capacity(roster_len);
+        for i in 0..roster_len {
+            let mut id = [0u8; 32];
+            id.copy_from_slice(&bytes[76 + 32 * i..76 + 32 * (i + 1)]);
+            roster.push(id);
+        }
+        let ct_len = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        at += 4;
+        if bytes.len() < at + ct_len {
             return Err(NullError::Group("envelope ct overrun".into()));
         }
         Ok(Self {
             group_id,
             epoch,
-            ct: bytes[44..44 + ct_len].to_vec(),
-            sealed: bytes[44 + ct_len..].to_vec(),
+            prev_hash,
+            roster,
+            ct: bytes[at..at + ct_len].to_vec(),
+            sealed: bytes[at + ct_len..].to_vec(),
         })
     }
+}
+
+/// Epoch commitment: `SHA3-256(secret ‖ epoch_BE)`.
+fn epoch_hash(secret: &[u8; 48], epoch: u64) -> [u8; 32] {
+    use sha3::{Digest, Sha3_256};
+    let mut h = Sha3_256::new();
+    h.update(secret);
+    h.update(epoch.to_be_bytes());
+    h.finalize().into()
+}
+
+/// Sorted member IDs for deterministic envelopes.
+fn roster_ids(members: &HashMap<[u8; 32], KeyPackage>) -> Vec<[u8; 32]> {
+    let mut ids: Vec<[u8; 32]> = members.keys().copied().collect();
+    ids.sort_unstable();
+    ids
 }
 
 /// Seal: encap fresh `k` to the member ek, AEAD the 48B secret under `k`
@@ -245,6 +393,8 @@ impl CommitEnvelope {
 fn seal_tree_secret(
     group_id: &[u8; 32],
     epoch: u64,
+    prev_hash: &[u8; 32],
+    roster: &[[u8; 32]],
     secret: &[u8; 48],
     member_ek: &[u8],
 ) -> Result<CommitEnvelope> {
@@ -266,6 +416,8 @@ fn seal_tree_secret(
     Ok(CommitEnvelope {
         group_id: *group_id,
         epoch,
+        prev_hash: *prev_hash,
+        roster: roster.to_vec(),
         ct,
         sealed,
     })
@@ -341,7 +493,8 @@ mod tests {
         let kp = KyberKeypair::generate();
         let mut secret = [0u8; 48];
         OsRng.fill_bytes(&mut secret);
-        let env = seal_tree_secret(&gid, 3, &secret, &kp.ek_bytes()).unwrap();
+        let env =
+            seal_tree_secret(&gid, 3, &[9u8; 32], &[[1u8; 32]], &secret, &kp.ek_bytes()).unwrap();
         let bytes = env.encode();
         let back = CommitEnvelope::decode(&bytes).unwrap();
         assert_eq!(back.ct, env.ct);
@@ -369,20 +522,39 @@ mod tests {
     }
 
     #[test]
+    fn forked_commit_rejected() {
+        // Aligned fork: B is current; tampering prev_hash (ct untouched, so
+        // decapsulation would still succeed) must fail the chain check.
+        let mut a2 = Group::create();
+        let (kp2, dk2) = real_kp(0x07);
+        let w2 = a2.prepare_welcome(kp2).unwrap();
+        let mut b2 = Group::join(&w2, [0x07; 32], &dk2).unwrap();
+        let (w3, commits3) = a2.add_member_commit(real_kp(0x08).0).unwrap();
+        let _ = w3;
+        let mut env3 = CommitEnvelope::decode(&commits3[0].1).unwrap();
+        env3.prev_hash[7] ^= 0x01;
+        let err = b2.apply_envelope(&env3.encode(), &dk2).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("chain"),
+            "forked prev_hash must fail chaining"
+        );
+    }
+
+    #[test]
     fn remove_commit_heals_remaining() {
-        // A hosts; B and C join via Welcome.
+        // A hosts; B joins (e1); C joins with a broadcast commit so B stays
+        // current (e2); A removes C and B applies the removal commit (e3).
         let mut a = Group::create();
         let (kp_b, dk_b) = real_kp(0x42);
         let (kp_c, dk_c) = real_kp(0x43);
         let w_b = a.prepare_welcome(kp_b).unwrap();
-        let w_c = a.prepare_welcome(kp_c).unwrap();
-        // B joins at its own Welcome (epoch 1); C joins at epoch 2. B syncs
-        // to the post-removal epoch via its commit envelope below — adds
-        // evolve the tree, removals re-randomize it, so stragglers always
-        // converge on the next commit addressed to them.
-        let _ = w_c;
-        let _ = dk_c;
         let mut b = Group::join(&w_b, [0x42; 32], &dk_b).unwrap();
+        let (w_c, commits_c) = a.add_member_commit(kp_c).unwrap();
+        assert_eq!(commits_c.len(), 1);
+        b.apply_envelope(&commits_c[0].1, &dk_b).unwrap();
+        let _ = Group::join(&w_c, [0x43; 32], &dk_c).unwrap();
+        assert_eq!(a.info().epoch, b.info().epoch);
+        assert_eq!(a.tree_secret, b.tree_secret);
         let old_secret = b.tree_secret;
         // A removes C with PCS commits; B applies its envelope.
         let commits = a.remove_member_commit(&[0x43; 32]).unwrap();
@@ -393,6 +565,8 @@ mod tests {
         assert_eq!(a.tree_secret, b.tree_secret);
         assert_ne!(a.tree_secret, old_secret);
         assert_eq!(a.info().epoch, b.info().epoch);
+        // Roster converged: B sees itself (C gone).
+        assert!(b.member_count() >= 1);
         // Replay of the same envelope is rejected (epoch guard).
         assert!(b.apply_envelope(env, &dk_b).is_err());
         // Wrong-group envelope rejected.

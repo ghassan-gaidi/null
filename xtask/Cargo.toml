@@ -11,3 +11,10 @@ path = "src/main.rs"
 anyhow = "1"
 sha2 = "0.10"
 hex = "0.4"
+null-core = { workspace = true }
+null-crypto = { workspace = true }
+null-frame = { workspace = true }
+null-session = { workspace = true }
+null-group = { workspace = true }
+null-update = { workspace = true }
+null-transport = { workspace = true }
