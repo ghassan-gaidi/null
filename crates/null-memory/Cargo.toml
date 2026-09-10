@@ -1,0 +1,12 @@
+[package]
+name = "null-memory"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+null-core = { workspace = true }
+zeroize.workspace = true
+rand.workspace = true
+thiserror.workspace = true
+libc = "0.2"
+sha2 = "0.10"

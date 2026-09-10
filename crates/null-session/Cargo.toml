@@ -1,0 +1,15 @@
+[package]
+name = "null-session"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+null-core = { workspace = true }
+null-crypto = { workspace = true }
+null-frame = { workspace = true }
+anyhow = "1"
+
+[dev-dependencies]
+null-transport = { workspace = true }
+null-identity = { workspace = true }
+tokio = { workspace = true }

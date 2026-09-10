@@ -1,0 +1,40 @@
+[workspace]
+members = [
+  "crates/null-core",
+  "crates/null-crypto",
+  "crates/null-frame",
+  "crates/null-transport",
+  "crates/null-memory",
+  "crates/null-identity",
+  "crates/null-group",
+  "crates/null-session",
+  "crates/null-tui",
+  "crates/null-update",
+  "crates/null-cli",
+  "xtask",
+]
+resolver = "2"
+
+[workspace.package]
+version = "2.0.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+rust-version = "1.75"
+
+[workspace.dependencies]
+null-core = { path = "crates/null-core" }
+null-crypto = { path = "crates/null-crypto" }
+null-frame = { path = "crates/null-frame" }
+null-transport = { path = "crates/null-transport" }
+null-memory = { path = "crates/null-memory" }
+null-identity = { path = "crates/null-identity" }
+null-group = { path = "crates/null-group" }
+null-session = { path = "crates/null-session" }
+null-tui = { path = "crates/null-tui" }
+null-update = { path = "crates/null-update" }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+rand = "0.8"
+rand_core = "0.6"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }

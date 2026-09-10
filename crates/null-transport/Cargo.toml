@@ -1,0 +1,12 @@
+[package]
+name = "null-transport"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+null-core = { workspace = true }
+thiserror.workspace = true
+serde.workspace = true
+tokio.workspace = true
+rand.workspace = true
+sha2 = "0.10"

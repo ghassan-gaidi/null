@@ -1,0 +1,28 @@
+[package]
+name = "null-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "null"
+path = "src/main.rs"
+
+[dependencies]
+null-core = { workspace = true }
+null-crypto = { workspace = true }
+null-frame = { workspace = true }
+null-transport = { workspace = true }
+null-memory = { workspace = true }
+null-identity = { workspace = true }
+null-group = { workspace = true }
+null-session = { workspace = true }
+null-tui = { workspace = true }
+null-update = { workspace = true }
+clap = { version = "4", features = ["derive"] }
+tokio.workspace = true
+anyhow = "1"
+signal-hook = "0.3"
+libc = "0.2"
+base64 = "0.22"
+ratatui = "0.29"
+crossterm = "0.28"
