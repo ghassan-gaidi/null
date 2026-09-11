@@ -1,0 +1,176 @@
+/*
+ * Null handshake — symbolic model (Tamarin 1.12).
+ *
+ * Covers the 3DH-core + Kyber-KEM handshake (deniable) and the ML-DSA
+ * verified extension, exactly as implemented in crates/null-crypto
+ * (HandshakeInit/Response codecs, signing_msg transcripts, verified
+ * constructors). The ratchet itself lives in ratchet.spthy, which assumes
+ * a securely established (root, chain, kq) triple — precisely what the
+ * lemmas here prove the handshake delivers. This assume-guarantee split
+ * keeps each theory tractable for automated proving.
+ *
+ * Verified mode models PINNED operation (null:// carries i=<ml-dsa
+ * fingerprint> and the CLI passes it as expected_fp to finalize_verified):
+ * the initiator fetches the peer's (ek, vk) directory pair for the SAME $B
+ * and aborts unless the vresp carries exactly that vk and ek. TOFU
+ * (expected_fp = None, first-use trust) accepts any vk and therefore
+ * cannot provide mutual_agreement — by design, and documented as such.
+ * Responder side remains TOFU (accepts any valid initiator signature);
+ * initiator pinning is what makes agreement provable.
+ *
+ * Abstractions: peers named (connection-string bootstrap); AEAD/HKDF/KEM
+ * ideal; ML-DSA via ideal `signing`; no counters (replay is availability-
+ * only). See model/README.md. Deniability/anonymity out of scope
+ * (observational equivalence; enforced separately in docs/deniability.md).
+ *
+ *   [x] hs_executable, verified_executable ..... honest runs complete
+ *   [x] root_secrecy ............................ establishment secrecy
+ *   [x] kci_initiator ........................... initiator KCI resistance
+ *   [x] mutual_agreement ........................ verified transcripts
+ *                                                (pinned; TOFU excluded)
+ *
+ * What is NOT claimed (deliberately, by design of the deniable core):
+ *  - Deniable-responder KCI/secrecy against ACTIVE initiators. Anyone can
+ *    encapsulate to B's public ek with a self-chosen (exa, kq) and compute
+ *    the resulting root from B's public reply — the initiator KNOWS the
+ *    session key by construction. There is no `kci_responder` lemma because
+ *    the property is false for any 1-RTT KEM-only deniable handshake; use
+ *    verified mode + pinning when authentication/KCI is required. The
+ *    initiator side (kci_initiator) DOES hold: leaking A's own KEM key
+ *    gives nothing about kq sealed to B.
+ */
+theory NullHandshake
+begin
+
+builtins: diffie-hellman, symmetric-encryption, signing, hashing
+
+// KEM keys use a SEPARATE constructor family (kempk/kenc/kdec) from the
+// signing builtin's pk/sign/verify. Sharing one `pk` let the adversary
+// use a revealed decapsulation key AS a signing key — impossible in code
+// (KyberKeypair vs IdentityKey are distinct Rust types) and invisible
+// without proving. See model/README.md.
+functions: g/0, kempk/1, kenc/2, kdec/2
+equations: kdec(k, kenc(m, kempk(k))) = m
+
+// Long-term keys + public directory (models null:// advertised keys).
+rule Register:
+  [ Fr(~ltk), Fr(~idk) ]
+  --[ ]->
+  [ !Ltk($A, ~ltk), !Ek($A, kempk(~ltk))
+  , !Idk($A, ~idk), !Vk($A, pk(~idk))
+  , Out(kempk(~ltk)), Out(pk(~idk)) ]
+
+rule Reveal_ltk:
+  [ !Ltk($A, ltk) ]
+  --[ LtkReveal($A) ]->
+  [ Out(ltk) ]
+
+rule Reveal_idk:
+  [ !Idk($A, idk) ]
+  --[ IdkReveal($A), IdkRevealVk(pk(idk)) ]->
+  [ Out(idk) ]
+
+// ---- Deniable handshake: fresh ephemeral + KEM encap to directory ek.
+
+rule I_1:
+  [ !Ek($B, ekB), Fr(~ephA), Fr(~kq) ]
+  --[ ]->
+  [ StI1($A, $B, ~ephA, ~kq)
+  , Out(<'init', $A, (g ^ ~ephA), kenc(~kq, ekB)>) ]
+
+// Responder decapsulates (pattern enforces the ct was made for our ek),
+// derives root+chain exactly as initial_root_key + chain init do.
+rule R_1:
+  [ !Ltk($B, ltkB), In(<'init', $A, exa, kenc(kq, kempk(ltkB))>), Fr(~ephB) ]
+  --[ RootEstR($B, $A, h(<((exa ^ ~ephB)), kq, 'root'>)), PeerPub(exa) ]->
+  [ StHS($B, <exa, (g ^ ~ephB)>)
+  , Out(<'resp', (g ^ ~ephB)>) ]
+
+// Initiator derives the same root from its side of the DH.
+rule I_2:
+  [ StI1($A, $B, ~ephA, ~kq), In(<'resp', exb>) ]
+  --[ RootEstI($A, $B, h(<((exb ^ ~ephA)), ~kq, 'root'>)), PeerPub(exb) ]->
+  [ StHS($A, <(g ^ ~ephA), exb>) ]
+
+// ---- Verified extension (ML-DSA over both transcripts).
+
+restriction Equality:
+  "All x y #i. Eq(x, y)@#i ==> x = y"
+
+restriction NonDegeneratePeer:
+  "All x #i. PeerPub(x) @ #i ==> not (x = g) & not (x = DH_neutral)"
+
+rule I_1v:
+  [ !Ek($B, ekB), !Vk($B, vkB), !Idk($A, idkA), Fr(~ephA), Fr(~kq), Fr(~devA) ]
+  --[ ]->
+  [ StI1v($A, $B, ~ephA, ~kq, ekB, pk(idkA), vkB)
+  , Out(<'vinit', $A, (g ^ ~ephA), kenc(~kq, ekB), pk(idkA), ~devA,
+      sign(<(g ^ ~ephA), kenc(~kq, ekB), pk(idkA), ~devA>, idkA)>) ]
+
+// R_1v: check the initiator transcript signature, then reply signed,
+// attesting our CURRENT directory ek inside the transcript (the initiator
+// pattern-matches it against the key it encapsulated to — stale directory
+// keys abort instead of deriving garbage; found via mutual_agreement).
+// The reply also echoes the initiator vk we verified: the initiator
+// pattern-matches the echo against its OWN vk, closing unknown-key-share
+// relabeling (an attacker that swaps vkA re-signs under its own key, so
+// the echo binds the responder's view to a key the initiator never holds).
+rule R_1v:
+  [ !Ltk($B, ltkB), !Idk($B, idkB)
+  , In(<'vinit', $A, exa, kenc(kq, kempk(ltkB)), vkA, devA, sigA>), Fr(~ephB), Fr(~devB) ]
+  --[ Eq(verify(sigA, <exa, kenc(kq, kempk(ltkB)), vkA, devA>, vkA), true)
+    , SessRv(pk(idkB), vkA, ((exa ^ ~ephB)), kq), PeerPub(exa) ]->
+  [ StHS($B, <exa, (g ^ ~ephB)>)
+  , Out(<'vresp', (g ^ ~ephB), kempk(ltkB), pk(idkB), ~devB, vkA,
+      sign(<exa, (g ^ ~ephB), kenc(kq, kempk(ltkB)), pk(idkB), ~devB, vkA>, idkB)>) ]
+
+rule I_2v:
+  [ StI1v($A, $B, ~ephA, ~kq, ekB, vkA, vkB)
+  , In(<'vresp', exb, ekB, vkB, devB, vkA, sigB>) ]
+  --[ Eq(verify(sigB, <(g ^ ~ephA), exb, kenc(~kq, ekB), vkB, devB, vkA>, vkB), true)
+    , SessIv(vkA, vkB, ((exb ^ ~ephA)), ~kq), PeerPub(exb) ]->
+  [ StHS($A, <(g ^ ~ephA), exb>) ]
+
+// ---------------------------------------------------------------- lemmas
+
+lemma hs_executable: exists-trace
+  "Ex A B r #i. RootEstI(A,B,r) @ #i"
+
+lemma verified_executable: exists-trace
+  "Ex vkAo vkBp dh kq #i. SessIv(vkAo,vkBp,dh,kq) @ #i"
+
+// Establishment secrecy: the root is secret against passive and active
+// attackers provided NEITHER long-term KEM key leaks. (Peer-key leak plus
+// active substitution is key-compromise impersonation, which no deniable
+// handshake resists — the peer's private key *is* the peer,
+// cryptographically. See kci_* below for what IS guaranteed, and use
+// verified mode + transparency to detect substitution.)
+lemma root_secrecy:
+  "All A B r #i. RootEstI(A,B,r) @ #i
+   & not (Ex #x. LtkReveal(A) @ #x)
+   & not (Ex #y. LtkReveal(B) @ #y)
+   ==> not (Ex #j. K(r) @ #j)"
+
+// Classical KCI resistance, initiator side: even with MY OWN long-term
+// key leaked, no one can impersonate the peer TO me (my fresh ephemeral
+// and the peer's uncompromised encapsulation carry the session).
+lemma kci_initiator:
+  "All A B r #i. RootEstI(A,B,r) @ #i
+   & not (Ex #y. LtkReveal(B) @ #y)
+   ==> not (Ex #j. K(r) @ #j)"
+
+// NOTE: there is deliberately NO kci_responder for the deniable core.
+// Counterexample (by construction, not a bug): anyone can pick fresh
+// (x, kq), send <'init', A, g^x, kenc(kq, ekB)> to B, read g^ephB from
+// B's reply, and compute h(<(g^ephB)^x, kq, 'root'>) — the initiator
+// knows the session key by design. Revealing B's own LTK makes it even
+// easier (decaps observed kq). Authentication/KCI for responders lives
+// in verified mode (mutual_agreement + pinning), not in the deniable core.
+
+// Mutual authentication, verified PINNED mode (non-injective).
+lemma mutual_agreement:
+  "All vkAo vkBp dh kq #i. SessIv(vkAo,vkBp,dh,kq) @ #i
+   ==> (Ex #j. SessRv(vkBp,vkAo,dh,kq) @ #j)
+     | (Ex vk #r. IdkRevealVk(vk) @ #r & (vk = vkAo | vk = vkBp))"
+
+end

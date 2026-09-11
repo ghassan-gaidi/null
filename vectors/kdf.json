@@ -1,0 +1,12 @@
+{
+  "fingerprint_hex_of_64x0x55": "ml-dsa:d810da4dd375788b0f35075eae37a990fd8bf2b16f63b30c6ea64eb2ae262efe",
+  "initial_root_key": {
+    "dh_hex": "3333333333333333333333333333333333333333333333333333333333333333",
+    "kyber_shared_hex": "4444444444444444444444444444444444444444444444444444444444444444",
+    "root_hex": "948cc359a786ce4d496ae60e238105b7b1d4e5232f8cba0311f6c17ea5cbc1ec220f570f5f3a2f922705ea7e698941c3"
+  },
+  "notes": "HKDF-SHA384(ctx) compositions; cross-checked with a Python RFC-5869 implementation (see vectors/README.md)",
+  "safety_number": "52029 18598 92607 27001 70170 06322 46080 93353 95096 11073 18315 72085",
+  "transparency_checkpoint_after_1_obs": "null-kt-v1:kat-contact:1:60a65f009f8c77f76dd4d99f6f9448d7816e5735734226833ad54128f68009a7",
+  "transparency_root_hex": "60a65f009f8c77f76dd4d99f6f9448d7816e5735734226833ad54128f68009a7"
+}

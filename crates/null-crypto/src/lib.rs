@@ -36,13 +36,56 @@ impl EphemeralKey {
         Self { secret, public }
     }
 
+    /// Fixed-secret construction for known-answer vectors and tests.
+    /// Production code must use [`EphemeralKey::generate`].
+    pub fn from_secret_bytes(secret: [u8; 32]) -> Self {
+        let secret = StaticSecret::from(secret);
+        let public = PublicKey::from(&secret);
+        Self { secret, public }
+    }
+
     pub fn public_bytes(&self) -> [u8; 32] {
         *self.public.as_bytes()
     }
 
-    pub fn diffie_hellman(&self, peer: &[u8; 32]) -> [u8; 32] {
+    pub fn diffie_hellman(&self, peer: &[u8; 32]) -> Result<[u8; 32]> {
+        use curve25519_dalek::{EdwardsPoint, MontgomeryPoint};
+        // Degenerate-peer rejection (found by Tamarin root_secrecy: a peer
+        // ephemeral equal to the basepoint makes the DH output equal our
+        // OWN public key — fully public — collapsing root secrecy without
+        // any key leak. Small-order/twist points and all-zero outputs are
+        // rejected on the same principle: never mix attacker-steerable
+        // degenerate DH output into the root).
+        const BASEPOINT_BYTES: [u8; 32] = [
+            9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 0,
+        ];
+        if peer == &BASEPOINT_BYTES {
+            return Err(NullError::Crypto(
+                "peer ephemeral is the basepoint; degenerate DH rejected".into(),
+            ));
+        }
+        let edwards: EdwardsPoint = match MontgomeryPoint(*peer).to_edwards(0) {
+            Some(p) => p,
+            None => {
+                return Err(NullError::Crypto(
+                    "peer ephemeral is not a valid curve point; rejected".into(),
+                ));
+            }
+        };
+        if edwards.is_small_order() {
+            return Err(NullError::Crypto(
+                "peer ephemeral is small-order; degenerate DH rejected".into(),
+            ));
+        }
         let peer_pk = PublicKey::from(*peer);
-        *self.secret.diffie_hellman(&peer_pk).as_bytes()
+        let shared = *self.secret.diffie_hellman(&peer_pk).as_bytes();
+        if shared == [0u8; 32] {
+            return Err(NullError::Crypto(
+                "degenerate DH output (all zeros); rejected".into(),
+            ));
+        }
+        Ok(shared)
     }
 }
 
@@ -186,6 +229,12 @@ pub mod identity {
             Self { seed }
         }
 
+        /// Fixed-seed construction for known-answer vectors and tests.
+        /// Production code must use [`IdentityKey::generate`].
+        pub fn from_seed(seed: [u8; 32]) -> Self {
+            Self { seed }
+        }
+
         fn signing_key(&self) -> SigningKey<MlDsa65> {
             SigningKey::<MlDsa65>::from_seed(&Seed::from(self.seed))
         }
@@ -297,6 +346,12 @@ pub struct HandshakeResponse {
     /// Responder device id (multi-device binding, `docs/multidevice.md`).
     /// All zeros = unbound.
     pub device_id: [u8; 16],
+    /// Echo of the INITIATOR's vk as the responder saw it (verified mode
+    /// only). The initiator aborts unless this equals its own vk: without
+    /// the echo, an attacker can relabel a victim's init under its own
+    /// identity and the responder silently misattributes the session
+    /// (unknown-key-share; found by Tamarin `mutual_agreement`).
+    pub vk_echo: Option<Vec<u8>>,
 }
 
 fn put_blob(out: &mut Vec<u8>, b: &[u8]) {
@@ -415,7 +470,7 @@ impl HandshakeInit {
 }
 
 impl HandshakeResponse {
-    /// Wire: `eph(32) ‖ ek_blob ‖ vk_opt ‖ sig ‖ device_id(16)`.
+    /// Wire: `eph(32) ‖ ek_blob ‖ vk_opt ‖ sig ‖ device_id(16) ‖ echo_opt`.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.ephemeral_pub);
@@ -429,6 +484,13 @@ impl HandshakeResponse {
         }
         put_sig(&mut out, &self.signature);
         out.extend_from_slice(&self.device_id);
+        match &self.vk_echo {
+            Some(vk) => {
+                out.push(1);
+                put_blob(&mut out, vk);
+            }
+            None => out.push(0),
+        }
         out
     }
 
@@ -453,24 +515,50 @@ impl HandshakeResponse {
             _ => return Err(NullError::Crypto("bad handshake vk flag".into())),
         };
         let (signature, rest) = get_sig(rest)?;
-        if rest.len() != 16 {
+        if rest.len() < 16 {
             return Err(NullError::Crypto(
                 "handshake response missing device id".into(),
             ));
         }
         let mut device_id = [0u8; 16];
-        device_id.copy_from_slice(rest);
+        device_id.copy_from_slice(&rest[..16]);
+        let rest = &rest[16..];
+        if rest.is_empty() {
+            return Err(NullError::Crypto(
+                "handshake response missing echo flag".into(),
+            ));
+        }
+        let (vk_echo, rest) = match rest[0] {
+            0 => (None, &rest[1..]),
+            1 => {
+                let (vk, r) = get_blob(&rest[1..])?;
+                (Some(vk), r)
+            }
+            _ => return Err(NullError::Crypto("bad handshake echo flag".into())),
+        };
+        if !rest.is_empty() {
+            return Err(NullError::Crypto(
+                "handshake response trailing bytes".into(),
+            ));
+        }
         Ok(Self {
             ephemeral_pub,
             kyber_ek,
             identity_vk,
             signature,
             device_id,
+            vk_echo,
         })
     }
 
     /// Transcript bytes covered by the responder's ML-DSA signature.
-    /// Includes the responder device id (see init-side note).
+    /// Includes the responder device id (see init-side note) and our
+    /// CURRENT long-term Kyber ek, so the initiator detects stale directory
+    /// keys instead of deriving a garbage session (fail closed here, not
+    /// at the first undecryptable message). Also covers the initiator-vk
+    /// echo: without it, an attacker can relabel a victim's init under its
+    /// own identity and the responder silently misattributes the session
+    /// (unknown-key-share; found by Tamarin `mutual_agreement`).
     pub fn signing_msg(&self, init_eph: &[u8; 32], init_ct: &[u8]) -> Vec<u8> {
         let mut m = Vec::new();
         m.extend_from_slice(init_eph);
@@ -479,7 +567,11 @@ impl HandshakeResponse {
         if let Some(vk) = &self.identity_vk {
             m.extend_from_slice(vk);
         }
+        m.extend_from_slice(&self.kyber_ek);
         m.extend_from_slice(&self.device_id);
+        if let Some(echo) = &self.vk_echo {
+            m.extend_from_slice(echo);
+        }
         m
     }
 }
@@ -491,6 +583,9 @@ pub struct HandshakeInitiator {
     pub own_kyber: KyberKeypair,
     pub peer_kyber_ek: Vec<u8>,
     init_ct: Vec<u8>,
+    /// Our own ML-DSA vk, if this is a verified initiation (needed to check
+    /// the responder's vk echo — a locally-known value, never from network).
+    own_vk: Option<Vec<u8>>,
 }
 
 impl HandshakeInitiator {
@@ -514,6 +609,7 @@ impl HandshakeInitiator {
                 own_kyber,
                 peer_kyber_ek: peer_kyber_ek.to_vec(),
                 init_ct: ct,
+                own_vk: None,
             },
             init,
         ))
@@ -526,15 +622,16 @@ impl HandshakeInitiator {
         id: &identity::IdentityKey,
         device_id: [u8; 16],
     ) -> Result<(Self, HandshakeInit)> {
-        let (state, mut init) = Self::initiate(peer_kyber_ek)?;
+        let (mut state, mut init) = Self::initiate(peer_kyber_ek)?;
         init.identity_vk = Some(id.verifying_bytes());
         init.device_id = device_id;
         init.signature = Some(id.sign(&init.signing_msg())?);
+        state.own_vk = Some(id.verifying_bytes());
         Ok((state, init))
     }
 
     pub fn finalize(self, resp: &HandshakeResponse) -> Result<Session> {
-        let dh3 = self.ek_a.diffie_hellman(&resp.ephemeral_pub);
+        let dh3 = self.ek_a.diffie_hellman(&resp.ephemeral_pub)?;
         let root = initial_root_key(&dh3, &self.k_kyber);
         Ok(Session::new_from_handshake(
             root,
@@ -553,6 +650,10 @@ impl HandshakeInitiator {
 
     /// Verified finalize: checks the responder's ML-DSA signature and,
     /// when `expected_fp` is `Some`, pins its vk fingerprint (TOFU otherwise).
+    /// Also requires the responder's attested long-term Kyber ek to equal
+    /// the directory key we encapsulated to: a mismatch means a stale (or
+    /// substituted) null:// string, and proceeding would derive a garbage
+    /// session, so we fail closed here instead.
     pub fn finalize_verified(
         self,
         resp: &HandshakeResponse,
@@ -566,6 +667,29 @@ impl HandshakeInitiator {
         })?;
         let transcript = resp.signing_msg(&self.ek_a.public_bytes(), &self.init_ct);
         identity::IdentityKey::verify(vk, &transcript, sig)?;
+        if resp.kyber_ek.is_empty() || resp.kyber_ek != self.peer_kyber_ek {
+            return Err(NullError::Crypto(
+                "responder key mismatch: stale null:// string? refusing to proceed".into(),
+            ));
+        }
+        // Unknown-key-share guard: the responder must echo exactly the vk
+        // we presented (bound into its signed transcript above). Anything
+        // else means our init was relabeled in flight — abort loudly.
+        // NOTE: own vk is local key material, never network-derived, so this
+        // comparison cannot be confused by the attacker.
+        let own_vk = self
+            .own_vk
+            .as_ref()
+            .ok_or_else(|| NullError::Crypto("verified finalize without local identity".into()))?;
+        match &resp.vk_echo {
+            Some(echo) if echo.as_slice() == own_vk.as_slice() => {}
+            _ => {
+                return Err(NullError::Crypto(
+                    "initiator vk echo mismatch: possible unknown-key-share; refusing to proceed"
+                        .into(),
+                ));
+            }
+        }
         if let Some(fp) = expected_fp {
             let got = identity::fingerprint_hex(vk);
             if got != fp {
@@ -632,7 +756,7 @@ fn respond_inner(
 ) -> Result<(HandshakeResponse, Session, Vec<u8>)> {
     let k_kyber = kyber_longterm.decapsulate(&init.kyber_ct)?;
     let ek_b = EphemeralKey::generate();
-    let dh3 = ek_b.diffie_hellman(&init.ephemeral_pub);
+    let dh3 = ek_b.diffie_hellman(&init.ephemeral_pub)?;
     let root = initial_root_key(&dh3, &k_kyber);
     let peer_pub = init.ephemeral_pub;
     let resp_pub = ek_b.public_bytes();
@@ -642,10 +766,15 @@ fn respond_inner(
         identity_vk: None,
         signature: None,
         device_id: [0u8; 16],
+        vk_echo: None,
     };
     if let Some(idkey) = id {
         resp.identity_vk = Some(idkey.verifying_bytes());
         resp.device_id = device_id;
+        // Echo the initiator vk we just verified: the initiator aborts
+        // unless this equals its own key, closing unknown-key-share
+        // relabeling (see signing_msg docs).
+        resp.vk_echo = init.identity_vk.clone();
         let transcript = resp.signing_msg(&init.ephemeral_pub, &init.kyber_ct);
         resp.signature = Some(idkey.sign(&transcript)?);
     }
@@ -882,22 +1011,22 @@ impl Session {
         self.kyber_generation += 1;
     }
 
-    fn ecdh_shared_or_zero(&self) -> [u8; 32] {
+    fn ecdh_shared_or_zero(&self) -> Result<[u8; 32]> {
         match self.peer_ecdh_pub {
             Some(pk) => self.ecdh_ratchet.diffie_hellman(&pk),
-            None => [0u8; 32],
+            None => Ok([0u8; 32]),
         }
     }
 
-    fn message_key(&self, counter: u64) -> [u8; 32] {
-        let ecdh = self.ecdh_shared_or_zero();
-        Self::message_key_raw(
+    fn message_key(&self, counter: u64) -> Result<[u8; 32]> {
+        let ecdh = self.ecdh_shared_or_zero()?;
+        Ok(Self::message_key_raw(
             &self.secrets.root_key,
             &self.secrets.chain_key,
             counter,
             &ecdh,
             &self.secrets.kyber_shared,
-        )
+        ))
     }
 
     fn message_key_raw(
@@ -946,7 +1075,7 @@ impl Session {
         // ECDH ratchet: fresh ephemeral for every message (classical PCS).
         self.ecdh_ratchet = EphemeralKey::generate();
         let counter = self.secrets.send_counter;
-        let mut mk = self.message_key(counter);
+        let mut mk = self.message_key(counter)?;
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&mk));
         let nonce = Self::nonce_for(counter);
         let mut buf = plaintext.to_vec();
@@ -993,10 +1122,13 @@ impl Session {
                 want: msg.kyber_gen,
             });
         }
-        // ECDH ratchet: adopt sender's new pub BEFORE deriving the message
-        // key, so DH(own_secret, new_pub) == DH(sender_new_secret, own_pub).
-        self.peer_ecdh_pub = Some(msg.ecdh_pub);
-        let ecdh = self.ecdh_shared_or_zero();
+        // ECDH ratchet: validate the sender's pub by deriving FIRST, and
+        // only adopt it into our ratchet state after a successful decrypt.
+        // (Adopting before validating would let one degenerate message
+        // poison all future sends/decrypts until the next good message.)
+        // DH equality still holds: DH(own_secret, new_pub) equals what the
+        // sender computed as DH(new_secret, our_pub).
+        let ecdh = self.ecdh_ratchet.diffie_hellman(&msg.ecdh_pub)?;
         let chain_for_msg = if msg.counter < self.secrets.recv_counter {
             self.skipped
                 .remove(&msg.counter)
@@ -1032,6 +1164,7 @@ impl Session {
         cipher
             .decrypt_in_place(&nonce, ad, &mut buf)
             .map_err(|e| NullError::Crypto(format!("aead decrypt: {e}")))?;
+        self.peer_ecdh_pub = Some(msg.ecdh_pub);
         self.secrets.msgs_since_kyber += 1;
         mk.zeroize();
         Ok(buf)
@@ -1105,6 +1238,27 @@ mod tests {
         };
         let k2 = b.decapsulate(&ct).unwrap();
         assert_eq!(k1, k2);
+    }
+
+    #[test]
+    fn degenerate_peer_pub_rejected() {
+        // Basepoint peer pub would make the DH output equal OUR OWN public
+        // key (fully public) — collapsing root secrecy with zero key
+        // leakage. Found by Tamarin root_secrecy; must fail closed here.
+        // Small-order coverage comes from the Edwards is_small_order check
+        // (audited curve25519-dalek primitive, applied unconditionally).
+        let ours = EphemeralKey::generate();
+        let mut basepoint = [0u8; 32];
+        basepoint[0] = 9;
+        assert!(ours.diffie_hellman(&basepoint).is_err());
+        // All-zero input: identity/twist degenerate.
+        assert!(ours.diffie_hellman(&[0u8; 32]).is_err());
+        // Sanity: honest keys still agree.
+        let peer = EphemeralKey::generate();
+        let s1 = ours.diffie_hellman(&peer.public_bytes()).unwrap();
+        let s2 = peer.diffie_hellman(&ours.public_bytes()).unwrap();
+        assert_eq!(s1, s2);
+        assert_ne!(s1, [0u8; 32]);
     }
 
     #[test]
@@ -1186,6 +1340,48 @@ mod tests {
         let (i_tmp, m_tmp) = HandshakeInitiator::initiate(&kp_tmp.ek_bytes()).unwrap();
         let (resp_d, _, _) = respond(&m_tmp, &responder_kp).unwrap();
         assert!(i_tmp.finalize_verified(&resp_d, None).is_err());
+        // Stale directory key: responder rotated since we fetched null://.
+        // Valid signatures on both sides, yet finalize must refuse rather
+        // than derive a garbage session (found by Tamarin mutual_agreement).
+        let kp_rotated = KyberKeypair::generate();
+        let (initiator4, init4) = HandshakeInitiator::initiate_verified(
+            &responder_kp.ek_bytes(),
+            &id_a,
+            id_a.device_id(0),
+        )
+        .unwrap();
+        let (resp4, _, _) =
+            respond_verified(&init4, &kp_rotated, &id_b, None, id_b.device_id(0)).unwrap();
+        match initiator4.finalize_verified(&resp4, None) {
+            Err(e) => assert!(format!("{e:?}").contains("key mismatch")),
+            Ok(_) => panic!("stale responder key must fail closed"),
+        }
+        // Unknown-key-share: attacker relabels our init under its own
+        // identity (re-signs with its own key — it controls Evil outright).
+        // The responder completes "with Evil"; WE must abort on the echo,
+        // not derive a session the responder misattributes to Evil.
+        let id_evil = IdentityKey::generate();
+        let (initiator5, init5) = HandshakeInitiator::initiate_verified(
+            &responder_kp.ek_bytes(),
+            &id_a,
+            id_a.device_id(0),
+        )
+        .unwrap();
+        let mut relabeled = init5.clone();
+        relabeled.identity_vk = Some(id_evil.verifying_bytes());
+        relabeled.signature = Some(id_evil.sign(&relabeled.signing_msg()).unwrap());
+        let (resp5, _, _) =
+            respond_verified(&relabeled, &responder_kp, &id_b, None, id_b.device_id(0)).unwrap();
+        // Sanity: responder really did complete (misattributed to Evil).
+        assert_eq!(
+            resp5.vk_echo,
+            Some(id_evil.verifying_bytes()),
+            "responder echoes what it verified"
+        );
+        match initiator5.finalize_verified(&resp5, None) {
+            Err(e) => assert!(format!("{e:?}").contains("unknown-key-share")),
+            Ok(_) => panic!("relabeled init must fail closed on echo"),
+        }
         // Chat still works on the verified session.
         let ad = b"a|b|2";
         let ct = sess_a.encrypt(b"verified hi", ad).unwrap();

@@ -929,6 +929,7 @@ name = "null-crypto"
 version = "2.0.0"
 dependencies = [
  "chacha20poly1305",
+ "curve25519-dalek",
  "hkdf",
  "hybrid-array 0.2.3",
  "kem",
@@ -1925,9 +1926,11 @@ dependencies = [
  "null-crypto",
  "null-frame",
  "null-group",
+ "null-identity",
  "null-session",
  "null-transport",
  "null-update",
+ "serde_json",
  "sha2 0.10.9",
 ]
 

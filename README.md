@@ -231,7 +231,20 @@ null://<56-char-onion>.onion?k=<base64 ML-KEM-1024 ek>&i=<ml-dsa:fingerprint>&t=
   compares hashes (verified identical).
 - **Gates**: `cargo fmt --check`, `cargo clippy --locked --all-targets
   -- -D warnings`, `cargo test --workspace`,
-  `cargo xtask fuzz` (see `.github/workflows/ci.yml`).
+  `cargo xtask fuzz`, `cargo xtask kat --check`
+  (see `.github/workflows/ci.yml` and `.github/workflows/tamarin.yml`).
+- **Formal verification**: `model/handshake.spthy` proves establishment
+  secrecy, initiator KCI resistance, and verified-PINNED mutual
+  authentication for the handshake under Dolev-Yao + compromise
+  (tamarin-prover 1.12.0, pinned, proven in CI — 5/5 lemmas). The ratchet
+  phase (`model/ratchet.spthy`) is modelled line-for-line but its
+  chain-update proofs are in progress (see its header). Scope and
+  abstractions are documented in `model/README.md` — including what is
+  explicitly NOT covered (deniability, anonymity, side channels, groups,
+  deniable-responder KCI which is false by construction).
+- **Known-answer vectors**: `vectors/` commits deterministic outputs
+  (X25519 cross-checked with OpenSSL, HKDF-SHA384 with an independent
+  Python implementation) so others can cross-implement; drift fails CI.
 
 ### Standards mapping
 
@@ -244,9 +257,11 @@ Level-3-style ongoing rekeying · SLSA-style reproducible builds.
 
 ## Limitations & roadmap
 
-- Formal protocol models (Tamarin/ProVerif) and nightly-only harnesses
-  (miri, cargo-fuzz) are the next track. A deterministic stable fuzz corpus
-  (`cargo xtask fuzz`, wired into CI) covers every wire decoder today.
+- Nightly-only harnesses (miri, cargo-fuzz with sanitizers) remain future
+  work. A deterministic stable fuzz corpus (`cargo xtask fuzz`, wired
+  into CI) covers every wire decoder today, and the Tamarin handshake
+  model (`model/handshake.spthy`, proven in CI) covers establishment;
+  ratchet proofs are in progress with behavior covered by tests + KATs.
 - Group commits are O(log n) TreeKEM path commits (proven by test: 3 bundles
   at depth 3 for 8 members). Remaining scaling work is operational (large-group
   fan-out batching), not cryptographic.

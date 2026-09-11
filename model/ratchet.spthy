@@ -1,0 +1,145 @@
+/*
+ * Null Triple Ratchet (NTR), ratchet phase — symbolic model (Tamarin 1.12).
+ *
+ * Assumes a securely established session triple (root, chain, kq) shared
+ * by exactly two parties — precisely what model/handshake.spthy proves
+ * the handshake delivers (root_secrecy + mutual_agreement). This
+ * assume-guarantee split keeps automated proving tractable; the shared
+ * term shapes (root/chain/kq, rotate-before-send DH, KEM rekey mixing)
+ * match crates/null-crypto line for line — see model/README.md.
+ *
+ * Covers: per-message ECDH ratchet (rotate-before-send) + symmetric
+ * chain, periodic Kyber re-encapsulation, Dolev-Yao network, session and
+ * long-term compromise. Abstractions: no counters (replay is
+ * availability-only), ideal AEAD/KDF/KEM/signatures-free (deniable core
+ * only here; verified sessions converge to the same state shape).
+ * KEM uses the same separate kempk/kenc/kdec family as handshake.spthy
+ * (never the signing builtin's pk), matching KyberKeypair vs IdentityKey
+ * separation in code.
+ *
+ * Status: MODELLED, PROOFS IN PROGRESS. The term shapes match code line
+ * for line, but automated proving of the stateful chain-update loop
+ * (Send/Recv advance chain every message) diverges under default
+ * heuristics — even exists-trace honest runs time out, while the same
+ * model with a static chain proves in seconds. This is a proof-search
+ * limitation, not a protocol finding: the handshake half of the split
+ * (model/handshake.spthy) is fully verified 5/5, and ratchet behavior is
+ * covered by unit tests, KAT vectors, and the deterministic fuzz corpus
+ * until an oracle/sources-annotated ratchet proof lands.
+ *
+ *   [ ] executable, rekey_executable ................ honest runs complete
+ *   [ ] msg_secrecy_no_compromise ................... message-key secrecy
+ *   [ ] forward_secrecy ............................. pre-compromise safe
+ *   [ ] pcs_after_rekey ............................. post-rekey healing
+ */
+theory NullRatchet
+begin
+
+builtins: diffie-hellman, symmetric-encryption, hashing
+
+functions: g/0, kempk/1, kenc/2, kdec/2
+equations: kdec(k, kenc(m, kempk(k))) = m
+
+// Secure session establishment (guaranteed by the handshake theory).
+// Both parties receive the SAME fresh (root, chain, kq); each knows its
+// own ephemeral secret and the peer's public — exactly the post-
+// handshake state in Session::new_from_handshake.
+rule Setup:
+  [ Fr(~root), Fr(~chain), Fr(~kq), Fr(~eA), Fr(~eB), Fr(~sid)
+  , Fr(~ltkA), Fr(~ltkB) ]
+  --[ SetupDone($A, $B) ]->
+  [ StSess($A, $B, ~sid, ~root, ~chain, ~eA, (g ^ ~eB), ~kq)
+  , StSess($B, $A, ~sid, ~root, ~chain, ~eB, (g ^ ~eA), ~kq)
+  , !Ltk($A, ~ltkA), !Ek($A, kempk(~ltkA))
+  , !Ltk($B, ~ltkB), !Ek($B, kempk(~ltkB))
+  , Out(kempk(~ltkA)), Out(kempk(~ltkB)) ]
+
+rule Reveal_ltk:
+  [ !Ltk($A, ltk) ]
+  --[ LtkReveal($A) ]->
+  [ Out(ltk) ]
+
+// Full session-state compromise; state persists (real compromise does
+// not stop the session, and later healing must still be provable).
+rule Reveal_session:
+  [ StSess($M, $P, sid, root, chain, ephO, ephP, kq) ]
+  --[ RevealSess($M, sid) ]->
+  [ StSess($M, $P, sid, root, chain, ephO, ephP, kq)
+  , Out(<root, chain, ephO, kq>) ]
+
+// Send: rotate-before-send. Fresh ephemeral FIRST, so the DH term the
+// sender computes, (peerPub ^ ephNew), equals what the receiver computes,
+// (newPub ^ ephOwn), by the DH equation — exactly the code's argument.
+rule Send:
+  [ StSess($M, $P, sid, root, chain, ephO, ephP, kq), Fr(~ephN) ]
+  --[ SendMsg($M, $P, sid, h(<root, chain, (ephP ^ ~ephN), kq, 'msg'>)) ]->
+  [ StSess($M, $P, sid, root, h(<chain, 'chain'>), ~ephN, ephP, kq)
+  , Out(<'msg', (g ^ ~ephN),
+      senc(h(<root, chain, (ephP ^ ~ephN), kq, 'msg'>), 'payload')>) ]
+
+// Recv: adopt the sender's new pub BEFORE deriving (code order), advance.
+rule Recv:
+  [ StSess($M, $P, sid, root, chain, ephO, ephP, kq)
+  , In(<'msg', exn, senc(h(<root, chain, (exn ^ ephO), kq, 'msg'>), pl)>) ]
+  --[ RecvMsg($M, $P, sid, h(<root, chain, (exn ^ ephO), kq, 'msg'>)) ]->
+  [ StSess($M, $P, sid, root, h(<chain, 'chain'>), ephO, exn, kq) ]
+
+// Rekey by encapsulation (either party may encapsulate to the peer's
+// directory ek — mirrors kyber_rekey_initiate targeting peer_kyber_ek).
+rule Rekey_encap:
+  [ StSess($M, $P, sid, root, chain, ephO, ephP, kq), !Ek($P, ekP), Fr(~kq2) ]
+  --[ RekeyBy($M, sid) ]->
+  [ StSess($M, $P, sid, h(<root, ~kq2, 'rekey'>), chain, ephO, ephP, ~kq2)
+  , Out(<'rekey', kenc(~kq2, ekP)>) ]
+
+// Rekey by decapsulation (mirrors kyber_rekey_receive; long-term pair is
+// stable, healing comes from the fresh k_new — also as in code).
+rule Rekey_decap:
+  [ StSess($M, $P, sid, root, chain, ephO, ephP, kq)
+  , !Ltk($M, ltkM), In(<'rekey', kenc(kq2, kempk(ltkM))>) ]
+  --[ RekeyBy($M, sid) ]->
+  [ StSess($M, $P, sid, h(<root, kq2, 'rekey'>), chain, ephO, ephP, kq2) ]
+
+// ---------------------------------------------------------------- lemmas
+
+// Sanity: honest traffic flows both directions.
+lemma executable: exists-trace
+  "Ex A B s mk1 mk2 #i #j #k #l.
+       SendMsg(A,B,s,mk1) @ #i & RecvMsg(B,A,s,mk1) @ #j
+     & SendMsg(B,A,s,mk2) @ #k & RecvMsg(A,B,s,mk2) @ #l"
+
+// Sanity: a rekey heals and post-rekey traffic flows (exercises both
+// rekey rules plus the chain continuity the PCS lemma depends on).
+lemma rekey_executable: exists-trace
+  "Ex A B s mk2 #k #l #m.
+       RekeyBy(A,s) @ #k
+     & SendMsg(A,B,s,mk2) @ #l & #k < #l
+     & RecvMsg(B,A,s,mk2) @ #m"
+
+// Message secrecy with zero compromise (long-term reveals allowed: the
+// strictly stronger claim — LTKs alone never suffice for message keys).
+lemma msg_secrecy_no_compromise:
+  "All M P s mk #i. SendMsg(M,P,s,mk) @ #i
+   & not (Ex #r. RevealSess(M,s) @ #r)
+   & not (Ex #r. RevealSess(P,s) @ #r)
+   ==> not (Ex #j. K(mk) @ #j)"
+
+// Forward secrecy: keys sent before a session-state compromise stay secret.
+lemma forward_secrecy:
+  "All M P s mk #i #r. SendMsg(M,P,s,mk) @ #i
+   & (RevealSess(M,s) @ #r | RevealSess(P,s) @ #r) & #i < #r
+   ==> not (Ex #j. K(mk) @ #j)"
+
+// Post-compromise security: after the applier heals via a fresh Kyber
+// rekey, later message keys are secret again — against quantum (HNDL)
+// adversaries too, since healing entropy is KEM-fresh, provided nothing
+// is revealed again afterwards.
+lemma pcs_after_rekey:
+  "All M P s mk #i #k #r.
+       RekeyBy(M,s) @ #k & RevealSess(M,s) @ #r & #r < #k
+     & SendMsg(M,P,s,mk) @ #i & #k < #i
+     & not (Ex #r2. RevealSess(M,s) @ #r2 & #k < #r2)
+     & not (Ex #r3. RevealSess(P,s) @ #r3 & #k < #r3)
+   ==> not (Ex #j. K(mk) @ #j)"
+
+end
