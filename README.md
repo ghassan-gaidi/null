@@ -37,6 +37,44 @@ live two-process chats (deniable, verified, TUI) proven over real sockets.
 
 ---
 
+## Null vs Signal vs iMessage vs Telegram
+
+Rough comparison against publicly documented designs, on the dimensions
+Null optimizes for. Mainstream apps win on maturity, audit depth, and
+usability; Null trades all of that for serverlessness and
+metadata-resistance.
+
+| Dimension | Null | Signal | iMessage | Telegram |
+|---|---|---|---|---|
+| Architecture | Serverless P2P over Tor / I2P / Nym; no accounts, no central server | Centralized servers; account required | Centralized (Apple); Apple ID / phone number | Centralized cloud; phone-number account |
+| E2E by default | Yes — every session | Yes | Yes (but iCloud backups can expose message history unless Advanced Data Protection is on) | No — only opt-in Secret Chats are E2E; default cloud chats are server-accessible |
+| Identity | `.onion` + keys; `i=` fingerprint pinned out-of-band | Phone number (usernames added as a contact layer, number still required) | Apple ID / phone number | Phone number (@usernames are aliases) |
+| Post-quantum | ML-KEM-1024 at handshake **plus** ongoing rekey (≤ 50 msgs / 7 days) | PQXDH at handshake; ongoing ratchet remains classical ECDH | PQ3: PQ handshake plus ongoing PQ rekeying | None (classical MTProto) |
+| Forward secrecy / healing | Per-message ECDH + one-way chain + PQ rekey; loss becomes loud failure, never silent divergence | Double Ratchet (classical FS/PCS) | PQ3 ratchet (FS + ongoing PQ healing) | Secret Chats rotate keys; cloud chats have no E2E FS story |
+| Deniable mode | Default: no signatures at all; `--verified` (ML-DSA-65) is opt-in | No user-facing deniable mode | No | No |
+| Metadata / cover traffic | Fixed 2048B frames, 1 frame/2s shaping + jitter, dummy cover; `.onion` resolution is remote (no local DNS leak) | Sealed sender + TLS to central servers; no padding/cover framing comparable to Null's | TLS to Apple infra; no user-visible cover traffic | TLS/MTProto to Telegram servers |
+| Censorship circumvention | Tor bridges, Snowflake, WebTunnel, obfs4, pluggable transports | Built-in circumvention (TLS proxies and related techniques) | None built-in | MTProto proxies |
+| Source availability | Fully open (MIT OR Apache-2.0), reproducible builds, Tamarin-checked handshake, committed KAT vectors | Open clients; server code published but run centrally | Closed source | Open clients; server closed |
+| Endpoint posture | Terminal-native, RAM-only, `mlock`, 3-pass panic wipe, duress PIN / decoy mode, USBGuard, clipboard auto-clear | Standard mobile/desktop app; data at rest on device, OS backups apply | Standard app; backups and iCloud sync apply | Standard app; cloud history by design |
+| Groups | TreeKEM commits, O(log n) path encapsulations, epoch hash-chaining (fork/gap/replay rejection) | Sender Keys (fan-out per sender) | Apple key-service mediated groups | Server-mediated groups |
+
+Caveats, stated plainly:
+
+- Signal and iMessage have far deeper external review and far larger
+  adversarial exposure than Null; a comparison table is not a security
+  ranking.
+- Telegram's default chats are outside the E2E comparison by design —
+  that is a product choice with real usability benefits (seamless
+  multi-device cloud sync), not just a missing feature.
+- "Post-quantum" rows describe asymmetric key establishment and
+  rekeying only; symmetric primitives (ChaCha20-Poly1305, AES) are
+  considered quantum-resistant at sufficient key sizes across all four.
+- Null's deniability is a protocol property of the default mode
+  (no signatures to show a third party), not anonymity and not
+  protection against a peer that screenshots or testifies.
+
+---
+
 ## Threat model
 
 Null is designed to resist:
