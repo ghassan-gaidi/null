@@ -1119,19 +1119,16 @@ async fn chat_loop_tui(
 /// USBGuard (§8.4): panic-wipe if a new /dev node appears (best-effort poll).
 fn spawn_usbguard() {
     std::thread::spawn(|| {
-        let snapshot = || {
+        let snapshot = || -> std::collections::HashSet<std::ffi::OsString> {
             std::fs::read_dir("/dev")
-                .map(|rd| {
-                    rd.filter_map(|e| e.ok().map(|d| d.file_name()))
-                        .collect::<Vec<_>>()
-                })
+                .map(|rd| rd.filter_map(|e| e.ok().map(|d| d.file_name())).collect())
                 .unwrap_or_default()
         };
         let mut known = snapshot();
         loop {
             std::thread::sleep(std::time::Duration::from_secs(2));
             let now = snapshot();
-            if now.len() > known.len() && now.iter().any(|n| !known.contains(n)) {
+            if now.iter().any(|n| !known.contains(n)) {
                 eprintln!("[null] USBGuard: new device node — panic wipe");
                 null_memory::panic_wipe_all_and_clear_screen();
                 std::process::exit(0);

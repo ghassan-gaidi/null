@@ -1,7 +1,7 @@
 //! Volatile-RAM memory hardening, Linux-first (§7).
 //!
 //! - mlock/munlock + MADV_DONTDUMP/WILLNEED + PR_SET_DUMPABLE=0
-//! - 3-pass panic wipe (rand → zero → rand) + munmap discipline
+//! - panic wipe (random → zero → random → zero) + munlock discipline
 //! - systemd-logind sleep inhibitor hook (best-effort)
 
 use null_core::{NullError, Result};
@@ -91,7 +91,9 @@ impl HardenedBuffer {
         Ok(())
     }
 
-    /// 3-pass Gutmann-inspired wipe: rand → zero → rand.
+    /// Gutmann-inspired wipe: random → zero → random → zero. The final
+    /// zero pass keeps allocator-reused pages clean; then the region is
+    /// munlocked.
     pub fn panic_wipe(&mut self) {
         let s = self.as_mut_slice();
         OsRng.fill_bytes(s);

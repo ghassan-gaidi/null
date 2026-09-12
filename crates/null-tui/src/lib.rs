@@ -135,15 +135,23 @@ pub fn clear_clipboard() {
 
 /// Copy text to the system clipboard, then schedule an auto-clear after
 /// [`CLIPBOARD_CLEAR_SECS`] (§8.2). The clear runs on a background thread so
-/// callers never block the chat loop.
+/// callers never block the chat loop. Each copy bumps a generation counter;
+/// only the newest copy's clearer may wipe, so a slower older clearer can
+/// never cut a newer copy's 5-second window short.
 pub fn clipboard_copy_and_schedule_clear(text: &str) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static CLIPBOARD_GEN: AtomicU64 = AtomicU64::new(0);
+
     copy_to_clipboard(text);
     if let Some(warn) = clipboard_manager_warning() {
         eprintln!("[null] WARN: {warn}");
     }
-    std::thread::spawn(|| {
+    let gen = CLIPBOARD_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    std::thread::spawn(move || {
         std::thread::sleep(std::time::Duration::from_secs(CLIPBOARD_CLEAR_SECS));
-        clear_clipboard();
+        if CLIPBOARD_GEN.load(Ordering::SeqCst) == gen {
+            clear_clipboard();
+        }
     });
 }
 
@@ -159,15 +167,19 @@ fn copy_to_clipboard(text: &str) {
             .spawn()
             .ok();
         if let Some(mut child) = wl {
-            if child
+            let written = child
                 .stdin
                 .as_mut()
                 .map(|s| s.write_all(text.as_bytes()).is_ok())
-                .unwrap_or(false)
-            {
+                .unwrap_or(false);
+            if written {
                 let _ = child.wait();
                 return;
             }
+            // wl-copy died before accepting input: reap it (no zombie)
+            // before falling back to xclip.
+            let _ = child.kill();
+            let _ = child.wait();
         }
         if let Ok(mut child) = std::process::Command::new("xclip")
             .args(["-selection", "clipboard"])
