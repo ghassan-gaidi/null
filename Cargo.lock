@@ -903,13 +903,11 @@ dependencies = [
  "null-core",
  "null-crypto",
  "null-frame",
- "null-group",
  "null-identity",
  "null-memory",
  "null-session",
  "null-transport",
  "null-tui",
- "null-update",
  "ratatui",
  "signal-hook",
  "tokio",
@@ -921,7 +919,6 @@ version = "2.0.0"
 dependencies = [
  "serde",
  "thiserror",
- "zeroize",
 ]
 
 [[package]]
@@ -937,11 +934,8 @@ dependencies = [
  "ml-kem",
  "null-core",
  "rand",
- "rand_core 0.6.4",
- "serde",
  "sha2 0.10.9",
  "sha3 0.10.9",
- "thiserror",
  "x25519-dalek",
  "zeroize",
 ]
@@ -950,13 +944,10 @@ dependencies = [
 name = "null-frame"
 version = "2.0.0"
 dependencies = [
- "chacha20poly1305",
  "null-core",
  "null-crypto",
  "rand",
- "serde",
  "thiserror",
- "tokio",
 ]
 
 [[package]]
@@ -980,9 +971,7 @@ name = "null-identity"
 version = "2.0.0"
 dependencies = [
  "null-core",
- "null-crypto",
  "qrcode",
- "serde",
  "sha3 0.10.9",
  "thiserror",
 ]
@@ -1032,7 +1021,6 @@ dependencies = [
  "crossterm",
  "null-core",
  "ratatui",
- "thiserror",
 ]
 
 [[package]]
@@ -1040,7 +1028,6 @@ name = "null-update"
 version = "2.0.0"
 dependencies = [
  "ed25519-dalek",
- "hex",
  "hybrid-array 0.4.15",
  "null-core",
  "rand",
@@ -1928,7 +1915,6 @@ dependencies = [
  "null-group",
  "null-identity",
  "null-session",
- "null-transport",
  "null-update",
  "serde_json",
  "sha2 0.10.9",

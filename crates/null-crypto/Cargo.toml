@@ -17,6 +17,3 @@ hybrid-array = "0.2"
 ml-dsa = "0.1"
 zeroize.workspace = true
 rand.workspace = true
-rand_core.workspace = true
-thiserror.workspace = true
-serde.workspace = true

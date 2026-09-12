@@ -5,8 +5,6 @@ edition.workspace = true
 
 [dependencies]
 null-core = { workspace = true }
-null-crypto = { workspace = true }
 sha3 = "0.10"
 thiserror.workspace = true
-serde.workspace = true
 qrcode = "0.7"

@@ -7,4 +7,3 @@ edition.workspace = true
 null-core = { workspace = true }
 ratatui = "0.29"
 crossterm = "0.28"
-thiserror.workspace = true

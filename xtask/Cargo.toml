@@ -19,4 +19,3 @@ null-identity = { workspace = true }
 null-session = { workspace = true }
 null-group = { workspace = true }
 null-update = { workspace = true }
-null-transport = { workspace = true }
