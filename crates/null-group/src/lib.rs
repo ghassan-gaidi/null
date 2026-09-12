@@ -253,6 +253,14 @@ impl TreeCommit {
         rest = &rest[32..];
         let (depth, r) = get_u32(rest)?;
         rest = r;
+        // Same bound as WelcomePkg::decode: process_commit grows the tree
+        // until its depth matches, so an unbounded declared depth from a
+        // malicious commit would panic (shift overflow ≥ 32) or OOM
+        // (2^31 leaves) before the epoch check could reject it. Real trees
+        // for the 50k-member cap need depth 16; 20 is generous headroom.
+        if depth > 20 {
+            return Err(NullError::Group("absurd tree depth".into()));
+        }
         let (roster, r) = get_roster(rest)?;
         rest = r;
         let (committer_leaf, r) = get_u32(rest)?;
@@ -1166,5 +1174,30 @@ mod tests {
         assert!(TreeCommit::decode(b"short").is_err());
         assert!(WelcomePkg::decode(b"\x02short").is_err());
         assert!(TreeCommit::decode(&[0x01]).is_err());
+    }
+
+    /// A commit declaring an absurd tree depth must be rejected at decode
+    /// time — process_commit grows the local tree to match, so an unbounded
+    /// depth would panic (shift overflow ≥ 32) or exhaust memory (2^31
+    /// leaves) before any epoch/fork check could fire (malicious-committer
+    /// DoS; WelcomePkg has carried the same guard since landing).
+    #[test]
+    fn commit_with_absurd_depth_rejected() {
+        // Minimal well-formed prefix: version, group id, epoch, prev_hash,
+        // then depth = 21 (> 20) — decode must refuse before reading more.
+        let mut bytes = vec![0x02];
+        bytes.extend_from_slice(&[7u8; 32]); // group id
+        bytes.extend_from_slice(&0u64.to_be_bytes()); // epoch
+        bytes.extend_from_slice(&[9u8; 32]); // prev hash
+        bytes.extend_from_slice(&21u32.to_be_bytes()); // depth
+        let err = TreeCommit::decode(&bytes).unwrap_err();
+        assert!(format!("{err:?}").contains("absurd tree depth"));
+        // Boundary sanity: depth 20 still parses past the depth field.
+        let mut ok = bytes.clone();
+        ok.splice(bytes.len() - 4.., 20u32.to_be_bytes());
+        let res = TreeCommit::decode(&ok);
+        // The rest of the package is truncated, but the failure must NOT be
+        // the depth guard anymore.
+        assert!(!format!("{res:?}").contains("absurd tree depth"));
     }
 }
