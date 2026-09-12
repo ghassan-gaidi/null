@@ -31,14 +31,6 @@ pub fn safety_number(ik_a: &[u8], ik_b: &[u8], session_id: &[u8]) -> String {
     groups.join(" ")
 }
 
-/// Parse `ml-dsa:<HEX>` fingerprint param from connection string.
-pub fn parse_identity_fingerprint(s: &str) -> Result<Vec<u8>> {
-    let hexpart = s.strip_prefix("ml-dsa:").ok_or_else(|| {
-        NullError::Identity(format!("identity must start with ml-dsa:, got `{s}`"))
-    })?;
-    hex::decode_fallback(hexpart)
-}
-
 /// Render safety number as ASCII QR (for TUI in-person verification).
 /// Uses the `qrcode` crate to produce block-art.
 pub fn safety_number_qr_ascii(safety_number: &str) -> Result<String> {
@@ -167,23 +159,6 @@ impl DeviceSet {
 
     pub fn active_count(&self) -> usize {
         self.devices.values().filter(|d| !d.revoked).count()
-    }
-}
-
-mod hex {
-    use super::*;
-    pub fn decode_fallback(h: &str) -> Result<Vec<u8>> {
-        let h = h.trim();
-        if !h.len().is_multiple_of(2) || !h.chars().all(|c| c.is_ascii_hexdigit()) {
-            return Err(NullError::Identity("bad hex fingerprint".into()));
-        }
-        (0..h.len())
-            .step_by(2)
-            .map(|i| {
-                u8::from_str_radix(&h[i..i + 2], 16)
-                    .map_err(|e| NullError::Identity(format!("hex: {e}")))
-            })
-            .collect()
     }
 }
 
