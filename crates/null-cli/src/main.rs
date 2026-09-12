@@ -6,7 +6,6 @@ use anyhow::Result;
 use clap::Parser;
 use null_core::ConnectionString;
 use null_transport::{Endpoint, Multiplexer};
-use std::time::Duration;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -676,8 +675,7 @@ async fn live_handshake(
 
 /// Responder mode (§12 discovery, inbound side): bind loopback, optionally
 /// provision our onion, serve one handshake, then chat. Prints the
-/// `null://` string the initiator needs. Eight scalar knobs would trip the
-/// arg-count lint, so they stay grouped by role in the signature below.
+/// `null://` string the initiator needs.
 #[allow(clippy::too_many_arguments)]
 async fn run_listener(
     port: u16,
@@ -1169,26 +1167,6 @@ fn secure_exit() -> ! {
     std::process::exit(0);
 }
 
-#[allow(dead_code)]
-fn hold_systemd_delay_lock() -> Option<std::process::Child> {
-    // Hold a systemd-logind delay lock so sleep triggers wipe first:
-    // `systemd-inhibit --what=sleep --mode=delay --who=null --why=wipe sleep infinity`
-    std::process::Command::new("systemd-inhibit")
-        .args([
-            "--what=sleep",
-            "--mode=delay",
-            "--who=null",
-            "--why=panic-wipe-before-ram-to-disk",
-            "sleep",
-            "infinity",
-        ])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .ok()
-}
-
 pub(crate) fn is_root() -> bool {
     #[cfg(unix)]
     {
@@ -1199,6 +1177,3 @@ pub(crate) fn is_root() -> bool {
         false
     }
 }
-
-#[allow(dead_code)]
-fn _keep_duration_used(_d: Duration) {}

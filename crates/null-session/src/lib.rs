@@ -149,17 +149,6 @@ pub enum HandshakeMsg {
     Response(HandshakeResponse),
 }
 
-/// Unpack a single-frame `Control` handshake message (responses, or any
-/// blob that fit one frame). Multi-frame inits need [`HandshakeReassembler`].
-#[allow(dead_code)]
-pub fn unpack_handshake(raw: &[u8]) -> anyhow::Result<HandshakeMsg> {
-    let mut re = HandshakeReassembler::new();
-    match re.add_raw(raw)? {
-        Some(m) => Ok(m),
-        None => Err(anyhow::anyhow!("handshake fragmented; use reassembler")),
-    }
-}
-
 #[derive(Debug)]
 pub enum Unpacked {
     /// Decrypted chat plaintext.

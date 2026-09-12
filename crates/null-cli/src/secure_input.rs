@@ -4,7 +4,6 @@
 
 use std::io::Read;
 use std::os::unix::fs::FileTypeExt;
-use std::time::Duration;
 
 // linux/input-event-codes.h (subset).
 const EV_KEY: u16 = 0x01;
@@ -142,7 +141,6 @@ fn read_line_from(mut f: &std::fs::File) -> std::io::Result<String> {
                 }
             }
         }
-        let _ = Duration::from_millis(0);
     }
 }
 

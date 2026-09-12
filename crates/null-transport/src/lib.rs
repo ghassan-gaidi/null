@@ -36,14 +36,6 @@ pub trait Transport: Send + Sync {
     fn describe(&self) -> String;
 }
 
-// Minimal async-trait shim without extra dep: we define our own macro-free
-// approach by boxing futures via tokio. To avoid pulling async-trait crate,
-// implementors return boxed futures through helper trait below.
-// (We keep `#[async_trait]`-style syntax by depending on nothing: instead
-// each transport exposes async fns and the multiplexer uses generics.)
-
-// For simplicity and zero extra deps, define a concrete enum dispatcher:
-
 /// Connection handle (framed bytes). Real backends wrap a tokio TcpStream
 /// to a local SOCKS5 / SAM / gateway port; loopback is used for tests.
 /// A `None` stream means a validated-but-virtual circuit (stub mode).
@@ -623,12 +615,6 @@ pub fn loopback_pair() -> (LoopbackHandle, LoopbackHandle) {
         LoopbackHandle { tx: a_tx, rx: a_rx },
         LoopbackHandle { tx: b_tx, rx: b_rx },
     )
-}
-
-// Re-export async_trait shim dependency-free: provide a tiny local macro so
-// `use null_transport::async_trait` isn't needed. We depend on nothing extra.
-pub mod async_trait {
-    pub use tokio as tokio_reexport;
 }
 
 #[cfg(test)]

@@ -34,9 +34,6 @@ impl Tui {
 
     pub fn touch(&mut self) {
         self.last_activity = Instant::now();
-        if self.locked {
-            // touch alone doesn't unlock; explicit PIN required.
-        }
     }
 
     pub fn should_auto_lock(&self) -> bool {
@@ -120,8 +117,6 @@ pub fn clear_clipboard() {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status();
-        // Fallback: overwrite X selection via xsel if present.
-        let _ = CLIPBOARD_CLEAR_SECS;
     }
     #[cfg(target_os = "macos")]
     {
