@@ -89,12 +89,6 @@ impl EphemeralKey {
     }
 }
 
-impl Drop for EphemeralKey {
-    fn drop(&mut self) {
-        // StaticSecret zeroizes on drop already; belt-and-braces.
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Kyber (ML-KEM-1024) wrapper
 // ---------------------------------------------------------------------------
@@ -166,22 +160,45 @@ pub fn kyber_encap_to(ek_bytes: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
 // HKDF-SHA384 helpers
 // ---------------------------------------------------------------------------
 
-fn hkdf_sha384(ikm: &[u8], salt: &[u8], info: &[u8], out_len: usize) -> Vec<u8> {
+/// HKDF-SHA384 expand into a caller-provided buffer — no heap round-trip.
+/// The `expect` cannot fire for the fixed sizes this crate uses (all
+/// outputs ≤ 48 bytes, far under HKDF's 255×hash-length cap).
+fn hkdf_sha384_into(ikm: &[u8], salt: &[u8], info: &[u8], out: &mut [u8]) {
     let hk = Hkdf::<Sha384>::new(Some(salt), ikm);
+    hk.expand(info, out).expect("hkdf expand");
+}
+
+fn hkdf_sha384(ikm: &[u8], salt: &[u8], info: &[u8], out_len: usize) -> Vec<u8> {
     let mut okm = vec![0u8; out_len];
-    hk.expand(info, &mut okm).expect("hkdf expand");
+    hkdf_sha384_into(ikm, salt, info, &mut okm);
     okm
 }
 
 pub fn initial_root_key(dh3: &[u8; 32], k_kyber: &[u8]) -> [u8; 48] {
-    let mut ikm = Vec::with_capacity(32 + k_kyber.len());
-    ikm.extend_from_slice(dh3);
-    ikm.extend_from_slice(k_kyber);
-    let salt = [0u8; 48];
-    let okm = hkdf_sha384(&ikm, &salt, b"Null-v2.0-initial-root-key", 48);
-    let mut out = [0u8; 48];
-    out.copy_from_slice(&okm);
-    out
+    // Stack path for the wire-representable sizes (k_kyber is the 32-byte
+    // ML-KEM-1024 shared secret; 64B of headroom keeps this future-proof).
+    const FIXED: usize = 32;
+    if k_kyber.len() <= 64 {
+        let mut ikm = [0u8; FIXED + 64];
+        ikm[..32].copy_from_slice(dh3);
+        let end = FIXED + k_kyber.len();
+        ikm[FIXED..end].copy_from_slice(k_kyber);
+        let mut out = [0u8; 48];
+        hkdf_sha384_into(
+            &ikm[..end],
+            &[0u8; 48],
+            b"Null-v2.0-initial-root-key",
+            &mut out,
+        );
+        out
+    } else {
+        let mut ikm = Vec::with_capacity(FIXED + k_kyber.len());
+        ikm.extend_from_slice(dh3);
+        ikm.extend_from_slice(k_kyber);
+        hkdf_sha384(&ikm, &[0u8; 48], b"Null-v2.0-initial-root-key", 48)
+            .try_into()
+            .expect("48-byte root")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,11 +1019,24 @@ impl Session {
     }
 
     fn mix_kyber_shared(&mut self, k_new: &[u8]) {
-        let mut ikm = Vec::with_capacity(48 + k_new.len());
-        ikm.extend_from_slice(&self.secrets.root_key);
-        ikm.extend_from_slice(k_new);
-        let okm = hkdf_sha384(&ikm, &[0u8; 48], b"kyber-ratchet", 48);
-        self.secrets.root_key.copy_from_slice(&okm);
+        // IKM = root(48) ‖ k_new. Stack path for real KEM secrets (32B),
+        // heap fallback for anything unexpectedly larger.
+        if k_new.len() <= 64 {
+            let mut ikm = [0u8; 48 + 64];
+            ikm[..48].copy_from_slice(&self.secrets.root_key);
+            let end = 48 + k_new.len();
+            ikm[48..end].copy_from_slice(k_new);
+            let mut next = [0u8; 48];
+            hkdf_sha384_into(&ikm[..end], &[0u8; 48], b"kyber-ratchet", &mut next);
+            self.secrets.root_key = next;
+        } else {
+            let mut ikm = Vec::with_capacity(48 + k_new.len());
+            ikm.extend_from_slice(&self.secrets.root_key);
+            ikm.extend_from_slice(k_new);
+            let mut next = [0u8; 48];
+            hkdf_sha384_into(&ikm, &[0u8; 48], b"kyber-ratchet", &mut next);
+            self.secrets.root_key = next;
+        }
         self.secrets.kyber_shared = k_new.to_vec();
         self.kyber_generation += 1;
     }
@@ -1036,26 +1066,45 @@ impl Session {
         ecdh: &[u8; 32],
         kyber_shared: &[u8],
     ) -> [u8; 32] {
-        let mut ikm = Vec::new();
-        ikm.extend_from_slice(root);
-        ikm.extend_from_slice(chain);
-        ikm.extend_from_slice(&counter.to_be_bytes());
-        ikm.extend_from_slice(ecdh);
-        ikm.extend_from_slice(kyber_shared);
-        let okm = hkdf_sha384(&ikm, &[0u8; 48], b"Null-v2.0-message-key", 32);
-        let mut k = [0u8; 32];
-        k.copy_from_slice(&okm);
-        k
+        // IKM layout: `root(48) ‖ chain(48) ‖ counter(8) ‖ ecdh(32) ‖
+        // kyber_shared`. Runs for every message in both directions, so the
+        // IKM is assembled on the stack (up to a 64-byte kyber_shared;
+        // ML-KEM-1024 secrets are 32B). Larger inputs fall back to the heap
+        // path rather than truncating and changing the derived key.
+        const FIXED: usize = 48 + 48 + 8 + 32; // root ‖ chain ‖ counter ‖ ecdh
+        if kyber_shared.len() <= 64 {
+            let mut ikm = [0u8; FIXED + 64];
+            ikm[..48].copy_from_slice(root);
+            ikm[48..96].copy_from_slice(chain);
+            ikm[96..104].copy_from_slice(&counter.to_be_bytes());
+            ikm[104..FIXED].copy_from_slice(ecdh);
+            let end = FIXED + kyber_shared.len();
+            ikm[FIXED..end].copy_from_slice(kyber_shared);
+            let mut k = [0u8; 32];
+            hkdf_sha384_into(&ikm[..end], &[0u8; 48], b"Null-v2.0-message-key", &mut k);
+            k
+        } else {
+            let mut ikm = Vec::with_capacity(FIXED + kyber_shared.len());
+            ikm.extend_from_slice(root);
+            ikm.extend_from_slice(chain);
+            ikm.extend_from_slice(&counter.to_be_bytes());
+            ikm.extend_from_slice(ecdh);
+            ikm.extend_from_slice(kyber_shared);
+            let mut k = [0u8; 32];
+            hkdf_sha384_into(&ikm, &[0u8; 48], b"Null-v2.0-message-key", &mut k);
+            k
+        }
     }
 
     fn advance_chain(&mut self) {
-        let okm = hkdf_sha384(
+        let mut next = [0u8; 48];
+        hkdf_sha384_into(
             &self.secrets.chain_key,
             &[0u8; 48],
             b"Null-v2.0-chain-step",
-            48,
+            &mut next,
         );
-        self.secrets.chain_key.copy_from_slice(&okm);
+        self.secrets.chain_key = next;
     }
 
     fn nonce_for(counter: u64) -> Nonce {
