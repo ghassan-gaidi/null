@@ -71,7 +71,7 @@ For each item, confirm the Tamarin abstraction matches the Rust:
 ## 6. How to verify locally
 
 ```bash
-cargo test --workspace --locked          # 90 tests
+cargo test --workspace --locked          # 91 tests
 cargo xtask fuzz 20000                   # decoder corpus
 cargo run -p xtask -- repro              # bit-identical builds
 tamarin-prover --prove model/handshake.spthy   # 5/5 lemmas (needs Maude 3.5.1, see model/README.md)
