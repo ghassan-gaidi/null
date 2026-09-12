@@ -12,7 +12,8 @@ pub const PROTOCOL_VERSION: u16 = 0x0002;
 pub const FRAME_SIZE: usize = 2048;
 /// Frame header size (§6.1).
 pub const FRAME_HEADER_SIZE: usize = 32;
-/// Max encrypted payload bytes per frame: 2048 - 32 header - padding.
+/// Max encrypted payload bytes per frame (ciphertext incl. the 16B
+/// Poly1305 tag): 2048 - 32 header - 16 tag - 16 margin.
 pub const MAX_PAYLOAD_SIZE: usize = 1984;
 /// Poly1305 tag length.
 pub const TAG_SIZE: usize = 16;

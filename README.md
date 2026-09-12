@@ -10,7 +10,7 @@ provides **Level 3 post-quantum messaging security**: ongoing post-quantum
 rekeying inside a continuous triple ratchet, multi-transport censorship
 resistance, and hardware-aware key isolation — all in a terminal-native app.
 
-Everything below is implemented and tested in this repository: 89 tests green,
+Everything below is implemented and tested in this repository: 90 tests green,
 `clippy -D warnings` clean, reproducible builds verified bit-identical, and
 live two-process chats (deniable, verified, TUI) proven over real sockets.
 
@@ -154,7 +154,7 @@ errors, never fake connectivity:
 
 Every network frame is exactly **2048 bytes**
 (`ver ‖ type ‖ counter ‖ len ‖ reserved ‖ payload ‖ random padding`).
-A token bucket (1 frame/2s base, burst 5, truncated-normal jitter) shapes
+A token bucket (1 frame/2s base, burst 5, uniform 1..3 s jitter) shapes
 sends, and indistinguishable dummy frames provide cover traffic while idle —
 including in live chats.
 
@@ -252,7 +252,7 @@ null://<56-char-onion>.onion?k=<base64 ML-KEM-1024 ek>&i=<ml-dsa:fingerprint>&t=
 
 ## Verification
 
-- **89 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
+- **90 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
   healing at message 51, lossless rekey-loss recovery, handshake codecs +
   fragmentation, TCP end-to-end (deniable *and* verified, incl.
   safety-number agreement), TreeKEM commits/openings/blanks, group

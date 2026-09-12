@@ -228,9 +228,9 @@ pub fn clipboard_manager_warning() -> Option<String> {
 /// The full-screen [`App`] below is the Ratatui interface.
 pub fn layout_hint(decoy: bool) -> &'static str {
     if decoy {
-        "IRC-like decoy — /unlock <pin> to reveal session"
+        "IRC-like decoy — type PIN + Enter to reveal session"
     } else {
-        "peers | messages | input — /lock /safe /quit"
+        "peers | messages | input — /lock /copy /quit"
     }
 }
 

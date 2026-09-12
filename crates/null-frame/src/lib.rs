@@ -83,7 +83,7 @@ impl Frame {
     }
 }
 
-/// Token-bucket regulator (§6.2): base 1 frame/2s, burst 5, jitter N(2s, 0.5s).
+/// Token-bucket regulator (§6.2): base 1 frame/2s, burst 5, jittered 1..3s slots.
 pub struct TrafficShaper {
     tokens: f64,
     capacity: f64,
@@ -118,13 +118,15 @@ impl TrafficShaper {
         }
     }
 
-    /// Jittered delay until next slot (truncated normal μ=2s σ=0.5s, clamped 0.5..4s).
+    /// Jittered delay until the next slot: uniform over 1..3 s (mean 2 s),
+    /// clamped to 0.5..4 s. A single cheap uniform sample (no float RNG,
+    /// no allocation) provides the inter-packet jitter; the clamps keep
+    /// pathological samples inside the shaped-envelope bounds.
     pub fn next_delay() -> Duration {
         let mut b = [0u8; 8];
         OsRng.fill_bytes(&mut b);
         let u = u64::from_be_bytes(b) as f64 / u64::MAX as f64; // 0..1
-                                                                // Box-Muller-ish cheap approx: map uniform to ±2σ.
-        let sample = 2.0 + (u - 0.5) * 2.0; // 1.0..3.0
+        let sample = 2.0 + (u - 0.5) * 2.0; // uniform 1.0..3.0
         Duration::from_secs_f64(sample.clamp(0.5, 4.0))
     }
 }
