@@ -153,7 +153,8 @@ errors, never fake connectivity:
 ### Traffic-analysis resistance
 
 Every network frame is exactly **2048 bytes**
-(`ver ‖ type ‖ counter ‖ len ‖ reserved ‖ payload ‖ random padding`).
+(`ver ‖ type ‖ counter ‖ len ‖ reserved ‖ payload ‖ random padding`,
+`ver = 0x0002` — any other version is rejected at decode).
 A token bucket (1 frame/2s base, burst 5, uniform 1..3 s jitter) shapes
 sends, and indistinguishable dummy frames provide cover traffic while idle —
 including in live chats.
@@ -269,7 +270,7 @@ null://<56-char-onion>.onion?k=<base64 ML-KEM-1024 ek>&i=<ml-dsa:fingerprint>&t=
   compares hashes (verified identical).
 - **Gates**: `cargo fmt --check`, `cargo clippy --locked --all-targets
   -- -D warnings`, `cargo test --workspace`,
-  `cargo xtask fuzz`, `cargo xtask kat --check`
+  `cargo xtask fuzz`, `cargo xtask kat --check`, `cargo xtask doccheck`
   (see `.github/workflows/ci.yml` and `.github/workflows/tamarin.yml`).
 - **Formal verification**: `model/handshake.spthy` proves establishment
   secrecy, initiator KCI resistance, and verified-PINNED mutual
@@ -311,10 +312,35 @@ Level-3-style ongoing rekeying · SLSA-style reproducible builds.
 
 ## Design docs
 
+Full documentation set (this repository, `docs/`):
+
+- `docs/security-posture.md` — the honest posture page: proven vs assumed
+  vs not-claimed, hardening status, audit roadmap.
+- `docs/threat-model.md` — adversaries, trust anchors, explicit non-goals.
+- `docs/crypto.md` — the cryptographic specification of the NTR ratchet,
+  mirroring the Tamarin models.
+- `docs/wire-protocol.md` — byte-level wire format: frames, handshake
+  messages, control payloads, loss recovery.
 - `docs/deniability.md` — what deniable mode guarantees (and plainly does
   not), enforced by a frame-level tripwire test.
+- `docs/transports.md` — daemon/sidecar model, multiplexer, traffic
+  shaping, bridge provisioning.
+- `docs/groups.md` — Null-MLS TreeKEM design, commit rules, limits.
+- `docs/memory-hardening.md` — RAM-only operation, wipe, HSM tiers,
+  clipboard/input hardening, duress.
+- `docs/updates.md` — hybrid-signed updates, downgrade floor, gossip.
 - `docs/multidevice.md` — one identity across N devices: transcript-bound
   device ids, fan-out, group revocation, and stated limits.
+- `docs/cli.md` — deep CLI behavior: modes, env switches, exit codes.
+- `docs/testing.md` — property → test matrix and CI topology.
+- `docs/development.md` — build/test/verify guide and crypto-modification
+  rules.
+- `docs/audit-scope.md` — reviewer brief + model↔code checklist.
+- `docs/operations.md` — operator runbook: daemons, bridges, keys,
+  incident response.
+- `docs/release.md` — release/signing/reproducibility ceremony.
+- `docs/api.md` — rustdoc recipe and crate-surface map.
+- `SECURITY.md` — vulnerability disclosure policy.
 
 ## License
 

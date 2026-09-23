@@ -1,476 +1,427 @@
-# Null — SOTA Production-Ready Design Specification v2.0
+# Null — Design & Verification Specification v2.0
+
+> Post-quantum, metadata-resistant, serverless peer-to-peer terminal
+> messenger. Everything below describes what the repository *does*, what is
+> *proven*, and what is *explicitly not claimed*. Statements marked
+> "❨target❩" are roadmap goals, not shipped behavior.
 
 ## 1. Executive Identity
 
-**Null** is a zero-telemetry, serverless, post-quantum peer-to-peer terminal messenger engineered to set the absolute benchmark for operational security, metadata defense, and cross-platform simplicity. It operates entirely in volatile RAM, leaves zero forensic residue, and provides **Level 3 post-quantum messaging security**—the first terminal-native application to achieve ongoing post-quantum rekeying inside a continuous ratchet, formally verified, with multi-transport censorship resistance and hardware-bound key isolation.
+**Null** is a zero-telemetry, serverless, post-quantum peer-to-peer
+terminal messenger. It runs entirely in volatile RAM, leaves no forensic
+residue on disk, and provides **ongoing post-quantum rekeying inside a
+continuous triple ratchet** — the Apple PQ3 Level-3-style property — plus
+multi-transport censorship resistance (Tor / I2P / Nym / Snowflake /
+WebTunnel / obfs4), hardware-aware key isolation, and a formally verified
+establishment layer.
+
+Proof status, stated plainly, in one paragraph:
+
+- **Engineered & tested**: 91 tests green, `clippy -D warnings` clean,
+  committed known-answer vectors, a stable-channel deterministic fuzz
+  corpus over every wire decoder, live two-process chats (deniable,
+  verified, TUI) proven over real sockets, and bit-identical reproducible
+  builds via `cargo xtask repro`.
+- **Formally verified**: the handshake is proven in the Dolev-Yao model
+  with tamarin-prover (5/5 lemmas, enforced in CI) — establishment
+  secrecy, initiator KCI resistance, and PINNED mutual authentication.
+- **In progress**: the ratchet phase is modelled line-for-line
+  (`model/ratchet.spthy`) but its chain-update proofs do not yet close
+  automatically; today it is covered by tests, KATs, and fuzz, and the
+  README/docs say exactly that.
 
 ---
 
 ## 2. Threat Model & Adversarial Assumptions
 
-Null is designed to resist the following adversaries:
+| Adversary Class | Capabilities | Null's posture |
+|---|---|---|
+| Passive network observer | Global traffic analysis, timing correlation, packet inspection | Defended: fixed 2048-byte frames, token-bucket shaping, dummy cover, Tor/I2P/Nym routing |
+| Active network attacker | MitM, injection, replay, rushing, dropping | Defended: AEAD + bound associated data, per-message ratchet, transcript resync bounds, loss = loud failure |
+| Quantum adversary (HNDL) | Stores ciphertexts today; breaks classical crypto later | Defended: ML-KEM-1024 now + periodic re-encapsulation (50 msgs / 604800 s); ML-DSA-65 + SLH-DSA are believed quantum-resistant |
+| Local forensic analyst | Disk imaging, swap analysis, cold boot | Defended (partially): zero disk writes, `mlock`/`MADV_DONTDUMP`, 3-pass wipe; cold boot with power retained is made expensive, not defeated |
+| Suppressive actor | Coercion, device seizure, rubber-hose | Mitigated: duress PIN, decoy mode, dead-man switch, alarm-level wipe; no crypto resists torture against *future* messages |
+| Malicious group member | Reads group traffic, sends crafted commits | Defended: TreeKEM with blank-node removal, epoch hash-chaining, fork/gap/replay rejection. Insider *availability* denial is not claimed |
+| Malicious update distributor | Serves crafted manifests/binaries | Defended: hybrid Ed25519 + SLH-DSA signatures (both mandatory), monotonic version, downgrade floor |
+| Supply chain attacker | Compromised registry/build/, substituted binary | Mitigated: pinned `Cargo.lock`, reproducible builds verified bit-identical, signed manifests. A malicious compiler/registry is out of scope, as it is for every toolchain |
+| Endpoint malware (user level) | Keyloggers, screen capture, memory scrape of the live process | Mitigated: evdev secure input, clipboard hygiene, anti-dump; a live-process scraper wins, stated plainly |
+| Endpoint malware (root/kernel) | Everything | **Out of scope** — for every messenger |
 
-| Adversary Class | Capabilities |
-|-----------------|-------------|
-| **Passive Network Observer** | Global traffic analysis, timing correlation, packet inspection |
-| **Active Network Attacker** | Man-in-the-middle, relay compromise, traffic injection |
-| **Quantum Adversary (Harvest Now, Decrypt Later)** | Stores all ciphertexts today; breaks classical crypto with a future quantum computer |
-| **Local Forensic Analyst** | Disk imaging, memory dumps, swap analysis, cold boot attacks, clipboard forensics |
-| **Endpoint Compromiser** | Malware with user-level privileges, keyloggers, screen capture, ptrace |
-| **Nation-State Censor** | Deep Packet Inspection (DPI), Tor relay enumeration, DNS poisoning, active probing |
-| **Supply Chain Attacker** | Compromised build infrastructure, malicious dependencies, binary substitution |
+### Trust assumptions (explicit)
+
+1. The Rust toolchain, crates.io registry, and pinned dependency tree are
+   honest (mitigated by `Cargo.lock` + reproducible builds, not eliminated).
+2. The OS kernel enforces `mlock`, `madvise`, and ptrace scope correctly.
+3. Transport daemons are the genuine articles. Traffic stays end-to-end
+   encrypted regardless; sidecar integrity is the operator's job.
+4. The user verifies fingerprints / safety numbers out-of-band at least
+   once. TOFU (no `i=` pin) provides no agreement guarantee — the UI says
+   so on every TOFU connect.
+5. Randomness (`OsRng` / kernel CSPRNG) is sound.
+
+### Non-goals, by design
+
+- Anonymity against a global passive adversary beyond what the transport
+  provides.
+- Protection of plaintext from the peer (screenshots, testimony),
+  or post-quantum deniability in the strong academic sense — the classical
+  deniability argument is documented in `docs/deniability.md`.
+- Forward secrecy against an adversary that *continuously* exfiltrates live
+  session state (ratchets heal point compromises, not permanent implants).
+- Hiding that Null is running (no binary steganography).
 
 ---
 
 ## 3. System Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                         TERMINAL INTERFACE LAYER                            │
-│  ┌───────────────────────────────────────────────────────────────────────┐  │
-│  │  Ratatui + Crossterm TUI  │  Bracketed Paste  │  Anti-Scrollback      │  │
-│  │  Decoy Mode (/safe)        │  Duress PIN       │  Auto-Lock Timer      │  │
-│  └───────────────────────────────────────────────────────────────────────┘  │
-└─────────────────────────────────┬───────────────────────────────────────────┘
-                                  │
-┌─────────────────────────────────▼───────────────────────────────────────────┐
-│                      NULL CORE ENGINE (RAM ONLY)                            │
-│                                                                             │
-│  ┌──────────────────────────┐    ┌─────────────────────────────────────┐  │
-│  │   Hardened Memory Pool   │◄──►│   OS Isolation Sandbox              │  │
-│  │  (mlock / MADV_DONTDUMP  │    │  Seccomp-BPF / Seatbelt / App Sandbox│  │
-│  │   VirtualLock / zeroize) │    │  PR_SET_DUMPABLE=0 / ptrace_scope    │  │
-│  └────────────┬─────────────┘    └─────────────────────────────────────┘  │
-│               │                                                             │
-│               ▼                                                             │
-│  ┌─────────────────────────────────────────────────────────────────────┐  │
-│  │              PQ3-STYLE TRIPLE RATCHET CRYPTO ENGINE                  │  │
-│  │                                                                      │  │
-│  │   ┌─────────────┐   ┌─────────────┐   ┌─────────────────────────┐   │  │
-│  │   │  X25519     │ + │ Kyber-1024  │ + │  Symmetric Ratchet      │   │  │
-│  │   │  ECDH       │   │ (ML-KEM)    │   │  (ChaCha20-Poly1305)    │   │  │
-│  │   │  Per-msg    │   │ Re-encap    │   │  HKDF-SHA384            │   │  │
-│  │   └─────────────┘   └─────────────┘   └─────────────────────────┘   │  │
-│  │                                                                      │  │
-│  │   • Triple Diffie-Hellman (3DH) initial handshake                   │  │
-│  │   • Periodic Kyber KEM re-encapsulation (~50 msgs / 7 days max)      │  │
-│  │   • Dual-key extraction: HKDF(s_ecdh ‖ s_kyber, salt, info)          │  │
-│  │   • 192-bit post-quantum security level                              │  │
-│  │                                                                      │  │
-│  └────────────┬──────────────────────────────────────────────────────────┘  │
-│               │                                                             │
-│               ▼                                                             │
-│  ┌──────────────────────────┐    ┌─────────────────────────────────────┐  │
-│  │  Optional Identity Layer │    │  Transport Multiplexer               │  │
-│  │  ML-DSA-65 / SPHINCS+    │    │  Tor V3 + I2P + Nym Mixnet           │  │
-│  │  Safety Number (QR/Hex)  │    │  Snowflake / WebTunnel / obfs4       │  │
-│  │  --deniable flag         │    │  Auto-fallback + Vanguards-lite      │  │
-│  └──────────────────────────┘    └─────────────────────────────────────┘  │
-└───────────────┼─────────────────────────────────────────────────────────────┘
-                │ Encrypted & Padded Payload (2048-byte frames)
-                └─────────────────────┬─────────────────────┘
-                                      ▼
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    MULTI-TRANSPORT OVERLAY NETWORK                          │
-│                                                                             │
-│   [ Peer A ] ──► (Tor Entry / I2P Tunnel / Nym Gateway) ──► [ Rendezvous ] │
-│        ▲                                                        │          │
-│        └────────────────────────────────────────────────────────┘          │
-│                                                                             │
-│   • All transports pierce NAT/CGNAT without open ports                       │
-│   • Zero IP exposure; geographic metadata fully eliminated                   │
-│   • Protocol mimicry: traffic shaped to match WebSocket/HTTP/2 patterns      │
-│   • Statistical indistinguishability via token-bucket traffic shaping      │
-└─────────────────────────────────────────────────────────────────────────────┘
+┌─ null-cli ─────────────────────────────────────────────────┐
+│ flags · listener/initiator · line REPL · Ratatui TUI       │
+├─ null-session ─────────────────────────────────────────────┤
+│ handshake framing+reassembly · pack/unpack · Inbox recovery│
+├─ null-crypto ───────────────┬─ null-frame ─────────────────┤
+│ NTR triple ratchet          │ 2048B frames · token bucket  │
+│ X25519+ML-KEM+ChaCha+HKDF   │ fixed padding · dummies      │
+├─ null-transport ────────────┴─ null-memory ────────────────┤
+│ Tor/I2P/Nym/PT + multiplexer│ mlock · 3-pass wipe · HSM    │
+├─ null-identity · null-group · null-tui · null-update ──────┤
+│ safety nums · TreeKEM       │ Ratatui App · signed updates │
+└─────────────────────────────┴─ null-core (truth) ──────────┘
 ```
+
+- `null-core` is the single source of truth for protocol versioning, frame
+  geometry, rekey policy, transport kinds, and `null://` connection-string
+  parsing.
+- 12 workspace members (`resolver = "2"`, edition 2021, `rust-version`
+  1.75, license MIT OR Apache-2.0).
+- RAM-only by design: no database, no config files, no session logs, no
+  disk writes at any layer.
 
 ---
 
-## 4. Cryptographic Protocol: The Null Triple Ratchet (NTR)
+## 4. Cryptographic Protocol: the Null Triple Ratchet (NTR)
 
-### 4.1 Initial Handshake (3DH + Kyber KEM)
+### 4.1 Terminology — why "triple"
 
-The session initiation combines **Triple Diffie-Hellman** for deniable authentication with **Kyber-1024 (ML-KEM-1024)** for quantum-resistant key establishment.
+The "triple" refers to **three ratchet mechanisms** per session, not to
+three DH computations:
 
-**Identity Keys (Optional Mode):**
-- Long-term identity: `IK_A = ML-DSA-65` (or Ed25519 in pure deniable mode)
-- Ephemeral keys: `EK_A = X25519`, generated per-session
+| Ratchet component | Source | Rekey trigger | Quantum resistance |
+|---|---|---|---|
+| ECDH ratchet | Fresh X25519 ephemeral per message | Every sent message (rotate-before-send) | Classical only |
+| Kyber ratchet | ML-KEM-1024 re-encapsulation to the peer's long-term ek | Every 50 messages or 604800 s (7 days), counted on **both** sides | Post-quantum |
+| Symmetric ratchet | HKDF-SHA384 chain advancement | Every message | Post-quantum once the root is PQ |
 
-**Handshake Flow:**
+### 4.2 Handshake (X25519 + ML-KEM-1024)
+
+Deniable by default (no long-term signatures on the wire):
+
 ```
-Peer A                                          Peer B
-------                                          ------
-Generate EK_A (X25519)                          Generate EK_B (X25519)
-Encapsulate to Kyber-1024 pubkey of B          (Kyber keypair pre-generated)
-  → (c, k_kyber)                               
+Peer A                                           Peer B
+------                                           ------
+EK_A = X25519 ephemeral                          (long-term Kyber keypair pre-generated)
+(c, k_kyber) = ML-KEM-1024 encapsulate(ek_B)     (long-term ek advertised in null:// k=)
+send: EK_A.pub ‖ c ‖ ek_A ‖ device_id  ──────►
+                                                  decap c → k_kyber ; generate EK_B
+◄────────────────────  EK_B.pub ‖ ek_B ‖ device_id ‖ vk_echo?
 
-Send: EK_A.pub ‖ c ‖ optional_sig(IK_A)  ─────►
-                                                Decapsulate c → k_kyber
-                                                Generate EK_B (X25519)
-
-◄────────────────────  EK_B.pub ‖ optional_sig(IK_B)
-
-Shared Secrets:
-  DH1 = X25519(IK_A.priv, EK_B.pub)   [or omitted in pure deniable mode]
-  DH2 = X25519(EK_A.priv, IK_B.pub)   [or omitted in pure deniable mode]
-  DH3 = X25519(EK_A.priv, EK_B.pub)
-  
-Root Key = HKDF-SHA384(
-  input:  DH3 ‖ k_kyber,
-  salt:   0^384,
-  info:   "Null-v2.0-initial-root-key"
-)
+shared = X25519(EK_A.priv, EK_B.pub)   (a single ECDH, "DH3" in 3DH terms;
+                                        DH1/DH2 with long-term keys are OMITTED
+                                        in deniable mode — the price of repudiation)
+root   = HKDF-SHA384(ikm = shared ‖ k_kyber, salt = 0³⁴⁸,
+                     info = "Null-v2.0-initial-root-key")   → 48 bytes
 ```
 
-### 4.2 Ongoing Triple Ratchet
+The product is *3DH-style* (deniable one-ECDH establishment) plus an
+ML-KEM-1024 quantum layer. The Tamarin model proves this exact equation.
 
-This is the **critical SOTA upgrade** over classical Double Ratchet. Null implements a PQ3-inspired triple ratchet with three independent keying contributions:
+**Verified mode (`--verified`, opt-in and loud):** both sides attach an
+ML-DSA-65 verification key and a deterministic signature over the full
+transcript (`signing_msg`, incl. `device_id` and the responder's current
+long-term ek). The responder must echo the initiator's vk (`vk_echo`) —
+the unknown-key-share guard — and return the exact advertised Kyber key
+(stale `null://` string fails closed). The initiator may pin the peer's
+fingerprint via the `i=` parameter (`ml-dsa:<sha3-256(vk)>`); without
+pinning, agreement is TOFU and is *not* claimed as a proof.
 
-| Ratchet Component | Source | Rekey Trigger | Quantum Resistance |
-|-------------------|--------|---------------|-------------------|
-| **ECDH Ratchet** | Per-message X25519 ephemeral exchange | Every message | Classical only |
-| **Kyber Ratchet** | Periodic Kyber-1024 re-encapsulation | Every 50 messages or 7 days | Post-quantum |
-| **Symmetric Ratchet** | HKDF chain advancement | Every message | Post-quantum (if root is PQ) |
+- ML-KEM-1024: ek 1568 B, ciphertext 1568 B.
+- ML-DSA-65: verification key 1952 B, signature 3309 B.
+- `device_id`: 16 bytes, all-zero = unbound (legacy single-device).
+- Sizes are why handshakes fragment: 1568+1568 B of Kyber material cannot
+  fit a single 1984-byte payload, so inits cross two frames.
 
-**Kyber Re-encapsulation Sub-Ratchet:**
-```
-Every N=50 messages (or T=7 days, whichever comes first):
-  1. Sender generates fresh Kyber-1024 keypair (ek, dk)
-  2. Sender encapsulates to receiver's long-term Kyber pubkey → (c, k_new)
-  3. Sender transmits c alongside next message frame
-  4. Receiver decapsulates c with dk → k_new
-  5. Both parties: Root_Key = HKDF-SHA384(Root_Key ‖ k_new, salt, "kyber-ratchet")
-```
+### 4.3 Message encryption
 
-**Message Key Derivation:**
-```
-Message_Key = HKDF-SHA384(
-  input:  Root_Key ‖ Chain_Key ‖ msg_counter ‖ ecdh_shared ‖ kyber_shared,
-  salt:   0^384,
-  info:   "Null-v2.0-message-key"
-)
-```
+- AEAD: ChaCha20-Poly1305, 256-bit keys derived per message via
+  `HKDF-SHA384(root ‖ chain ‖ counter ‖ ecdh ‖ kyber_shared, 0³⁴⁸,
+  "Null-v2.0-message-key")` → 32 B.
+- Nonce: 12 bytes, `[0u8;4] ‖ counter.to_be_bytes()`.
+- Associated data: the session layer binds
+  `"{sender}|{receiver}|{PROTOCOL_VERSION}"` (onion labels) or the hex
+  long-term Kyber eks (`docs/wire-protocol.md`), so a message cannot be
+  replayed into another direction or version.
+- Wire format: `counter(8) ‖ kyber_generation(8) ‖ ecdh_pub(32) ‖
+  ciphertext` — every message carries its PQ generation for loss detection.
 
-**AEAD Encryption:**
-- Algorithm: **ChaCha20-Poly1305** with 256-bit keys
-- Nonce: 96-bit counter, monotonically increasing per chain
-- Associated Data: `sender_onion ‖ receiver_onion ‖ msg_counter ‖ protocol_version`
+### 4.4 Key timeline, forward secrecy, PCS
 
-### 4.3 Deniable Authentication Mode
+- One-way HKDF chains give forward secrecy: compromise of current keys
+  does not reveal past message keys.
+- Classical post-compromise security after **1 message** (fresh ECDH
+  ephemeral on both sides); quantum PCS at the **next Kyber rekey**.
+- Recovery bounds, independent and not to be conflated:
+  - skipped-jump window `MAX_SKIP = 200` (chain keys cached, wiped on drop);
+  - retained rekeys `RETAINED_REKEYS = 8` for loss replay;
+  - pending undecryptable buffer `MAX_PENDING = 16` and
+  - hard resync cap `MAX_REKEY_ROUNDS = 3` — beyond it the session
+    demands a re-handshake instead of silently diverging.
 
-By default, Null operates in **pure deniable mode** (no long-term signatures). An optional `--verified` flag enables:
+### 4.5 Deniable & verified identity layer
 
-- **ML-DSA-65** identity key signatures during handshake
-- **Safety Number** generation: `SHA3-256(IK_A.pub ‖ IK_B.pub ‖ session_id)` displayed as 12 groups of 5-digit numbers
-- **QR-code** out-of-band verification for in-person identity confirmation
-- **Key transparency** log (append-only, client-side Merkle tree) to detect unauthorized key changes
-
-The `--deniable` flag (default) strips all signature material, ensuring no cryptographic proof of communication can be extracted post-session.
-
-### 4.4 Post-Compromise Security (Self-Healing)
-
-The triple ratchet provides **PCS** bounds:
-- **Classical PCS**: Restored after 1 message exchange (ECDH ratchet)
-- **Quantum PCS**: Restored after Kyber re-encapsulation event (max 50 messages / 7 days)
-- **Future Secrecy**: Compromise of current keys does not reveal past messages due to one-way chain evolution
+- Default: no signature material anywhere on the wire.
+- `--verified`: `IdentityKey` (32-byte seed, derived transiently),
+  fingerprint `ml-dsa:<hex sha3-256(vk)>`, safety number
+  `SHA3-256(canonical(vkA,vkB) ‖ session_id)` shown as 12 groups of 5
+  digits, scannable QR, and an in-RAM key-transparency log that fails
+  closed on key change.
+- Deniable mode makes transcripts non-transferable (either peer could have
+  forged every byte); it is **not** anonymity, and it is voided by
+  `--verified` by design.
 
 ---
 
-## 5. Transport Layer: Multi-Transport Censorship Resistance
+## 5. Transport & Traffic Analysis
 
-### 5.1 Primary Transport: Tor V3 (Embedded)
+### 5.1 Transports
 
-- Self-contained **Arti** (Rust Tor implementation) or embedded Tor daemon
-- Ephemeral V3 onion service with 56-character address
-- **Vanguards-lite**: Restrict guard node rotation to reduce guard exposure attacks
-- **Onionbalance** support for load distribution across multiple introduction points
+Null dials **local daemons/sidecars** (never embedded Tor): SOCKS5 for
+Tor (port 9050) and Nym (1080), SAMv3 for I2P (7656); Tor control (9051)
+drives ephemeral onion provisioning (`ADD_ONION`). Snowflake, WebTunnel,
+and obfs4 need operator-installed pluggable-transport sidecars (torrc
+bridge guidance included); they fail closed, with remediation text, when
+absent. Without `NULL_LIVE_TRANSPORT=1` dials validate the daemon port
+(150 ms probe) and return virtual test circuits — live bytes only with the
+flag set.
 
-### 5.2 Fallback Transports
+| Transport | Use case | Modeled latency (multiplexer election) |
+|---|---|---|
+| Tor | Baseline anonymity, onion rendezvous | 350 ms |
+| I2P | Tor-blocked regions | 900 ms |
+| Nym | Maximum metadata protection | 1400 ms |
+| Snowflake | Active censorship (WebRTC bridges) | 700 ms |
+| WebTunnel | DPI-heavy networks (HTTPS cover) | 420 ms |
+| obfs4 | Bridge-level blocking | 380 ms |
 
-| Transport | Use Case | Fingerprint Resistance |
-|-----------|----------|----------------------|
-| **I2P** | Tor-blocked regions | Garlic routing with tunnels; harder to enumerate |
-| **Nym Mixnet** | Maximum metadata protection | Cover traffic + mix nodes; 3-hop mixing with delays |
-| **Snowflake** | Active censorship (China, Iran) | WebRTC-based; blends with video conferencing |
-| **WebTunnel** | Deep Packet Inspection | HTTPS-encapsulated; looks like normal web traffic |
-| **obfs4** | Bridge-level blocking | Scrambles traffic to resist active probing |
+The multiplexer elects by latency-weight with a 50 ms priority-rank
+tie-break, and fails over transparently across all transports in priority
+order.
 
-### 5.3 Transport Multiplexer
+### 5.2 Constant-size frames & shaping
 
-Null runs all transports in parallel, selecting the **fastest working path** via a latency-weighted election algorithm. If the primary Tor circuit degrades, traffic transparently fails over to I2P or Nym without user intervention.
+- Every frame is exactly **2048 bytes**:
+  `ver(2) ‖ type(1) ‖ counter(8) ‖ payload_len(4) ‖ reserved(17) ‖
+  payload ‖ random padding`. Header 32 bytes; payload max **1984**;
+  placement of the 16-byte Poly1305 tag is the caller's (encrypt-then-fit).
+- Token bucket: 1 frame/2 s base (`SHAPER_BASE_INTERVAL_MS = 2000`,
+  refill 0.5/s), burst **5**, inter-frame delay uniform 1.0–3.0 s
+  (clamped 0.5–4.0 s) from a single uniform sample — timing does not
+  fingerprint an RNG.
+- Idle peers emit indistinguishable dummy frames (64 random bytes
+  payload, same 2048-byte form) at the shaped rate in line and TUI modes.
+- Frame types: `Data(0x01)`, `Dummy(0x02)`, `Control(0x03)`,
+  `KyberRekey(0x04)`; any other type byte is rejected. Version mismatch
+  (`PROTOCOL_VERSION = 0x0002`) is rejected at decode.
 
-### 5.4 Connection String Format
+### 5.3 Connection lifecycle
 
-```
-null://[56-char-onion].onion?[kyber_pubkey]&[optional_identity_fingerprint]&[transport=priority]
-```
-
-Example:
-```
-null://zqktlwiuavvvqqt4ybvgvi7tyo4hjl5xgfuvpdf6otjiycgwqbym2qad.onion?k=AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA&i=ml-dsa:ABCD...&t=tor,i2p,nym
-```
-
----
-
-## 6. Traffic Analysis Resistance
-
-### 6.1 Frame Structure
-
-All network frames are padded to **2048 bytes** (matching common TLS record sizes) to eliminate length-based traffic analysis:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│  Frame Header (32 bytes)                                                    │
-│  ├── Protocol Version (2 bytes): 0x0002                                       │
-│  ├── Frame Type (1 byte): DATA / DUMMY / CONTROL / KYBER_REKEY               │
-│  ├── Message Counter (8 bytes): Monotonic uint64                             │
-│  ├── Payload Length (4 bytes): Actual encrypted payload size                 │
-│  └── Reserved (17 bytes): Randomized padding                                   │
-├─────────────────────────────────────────────────────────────────────────────┤
-│  Encrypted Payload (0–1984 bytes)                                            │
-│  ├── ChaCha20-Poly1305 ciphertext                                             │
-│  └── Includes 16-byte Poly1305 tag                                           │
-├─────────────────────────────────────────────────────────────────────────────┤
-│  Padding (variable): Random bytes to fill 2048-byte frame                    │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-### 6.2 Token-Bucket Traffic Shaping
-
-Null implements a **token bucket regulator** to shape traffic:
-
-- **Base rate**: 1 frame every 2 seconds (minimum)
-- **Burst capacity**: 5 frames
-- **Jitter**: Inter-packet intervals drawn from a truncated normal distribution (μ=2s, σ=0.5s) to prevent clock-skew fingerprinting
-- **Protocol mimicry**: Frame timing patterns statistically match HTTP/2 or WebSocket keepalive traffic
-
-### 6.3 Dummy Traffic Generation
-
-When the user is idle, Null transmits **indistinguishable dummy frames** at the shaped rate. Dummy frames:
-- Are encrypted with ephemeral keys (decrypt to random plaintext)
-- Carry the same 2048-byte frame size
-- Include valid Poly1305 tags (computed over random data)
-- Are silently dropped by the receiver after authentication failure
-
-This prevents **timing attacks**, **typing cadence analysis**, and **inter-message interval fingerprinting**.
+Length-prefixed `u32 BE` blobs (≤ 16 MiB), 120 s receive timeout. On quit:
+goodbye control frame, then ~2 s inbound drain — this is what guarantees a
+peer's in-flight messages are never RST-discarded. On peer FIN/RST: drain,
+then panic-wipe and exit 0.
 
 ---
 
-## 7. Memory Hardening & Forensic Destruction
+## 6. Memory Hardening & Endpoint Security
 
-### 7.1 Volatile Architecture
-
-- **Zero disk writes**: No database, no config files, no session logs
-- **No swap exposure**: All sensitive buffers allocated with `mlock()` (Linux), `VirtualLock()` (Windows), or `mach_vm_wire()` (macOS)
-- **No core dumps**: `prctl(PR_SET_DUMPABLE, 0)` on Linux; `SetProcessValidCallTargets` on Windows
-- **No ptrace**: `PR_SET_PTRACER` restrictions; Yama LSM `ptrace_scope=1`
-
-### 7.2 Memory Advisories
-
-```rust
-// Linux
-madvise(secret_buffer, len, MADV_DONTDUMP);  // Exclude from core dumps
-madvise(secret_buffer, len, MADV_WILLNEED);  // Keep resident
-
-// macOS  
-mlock(secret_buffer, len);
-pthread_jit_write_protect_np(); // Where applicable
-
-// Windows
-VirtualLock(secret_buffer, len);
-SetProcessValidCallTargets(GetCurrentProcess(), ...);
-```
-
-### 7.3 Panic Wiping Routine
-
-On any termination signal (`SIGINT`, `SIGTERM`, `SIGHUP`, terminal close, window manager kill):
-
-```
-1. Disable all signal handlers (prevent re-entry)
-2. Overwrite all key buffers with cryptographically secure random data
-3. Overwrite with zeroes
-4. Overwrite with random data again (3-pass Gutmann-inspired)
-5. Call munlock() / VirtualUnlock()
-6. munmap() all allocated regions
-7. Clear terminal scrollback (ESC[3J + ESC[H + ESC[2J)
-8. Exit with code 0
-```
-
-### 7.4 Cold Boot & Hibernation Protection
-
-- Register for **sleep/hibernate notifications** (Linux: `systemd-logind` inhibitor locks; macOS: `IORegisterForSystemPower`; Windows: `WM_POWERBROADCAST`)
-- On sleep signal: trigger panic wiping routine before system writes RAM to disk
-- Warn user if hibernation is enabled and offer to disable it
-
-### 7.5 Hardware Security Module (HSM) Integration
-
-**Tier 1 (Software)**: Keys derived in RAM only (default)
-
-**Tier 2 (TPM 2.0 / Apple Secure Enclave / YubiKey)**:
-- Long-term identity key generated inside HSM, never exportable
-- Ratchet root key derived via HMAC-SHA384 with HSM-bound key material
-- Even with full memory compromise, identity key cannot be extracted
-- YubiKey support via HMAC challenge-response (slot 2)
+- Zero disk writes; every sensitive buffer zeroized on drop.
+- Linux: `mlock`, `MADV_DONTDUMP`, `PR_SET_DUMPABLE=0`; macOS/Windows
+  abstractions ready (VirtualLock/mach_vm_wire scaffolding).
+- 3-pass panic wipe (random → zero → random) on SIGINT/SIGTERM/SIGHUP,
+  panic hook, Ctrl-C, `/quit`, EOF, peer goodbye, dead-man switch, and
+  USBGuard trigger (new `/dev` node).
+- Terminal: alternate screen, scrollback kill on exit, bracketed paste off
+  by default; clipboard copy clears in **5 s** (`CLIPBOARD_CLEAR_SECS`)
+  with clipboard-manager warnings; Wayland wl-copy zombies reaped.
+- Secure input: optional `--secure-input` reads `/dev/input/event*`
+  (root) to bypass terminal keyloggers; falls back to `/dev/tty` loudly.
+- Duress/decoy: demo TUI PIN `1234`; duress PIN `0000` triggers wipe;
+  `--safe` runs a benign IRC-like decoy surface; auto-lock default
+  1800 s (`auto_lock_secs`); dead-man default disabled, `--dead-man-secs
+  <N>` wipes+exits after N idle (default constant 1800 in `null-core`,
+  CLI default 0).
+- HSM tiers:
+  - **Tier 1 (shipped)**: RAM-only `SoftwareHsm`; device-bound local
+    secret mixing via `SHA384("Null-v2.0-hsm-bind:" ‖ context ‖
+    machine-id ‖ secret)`. The shared ratchet root is deliberately *never*
+    mixed with device-local material — peers could not converge; the HSM
+    guards local identity secrets only.
+  - **Tier 2 (probe)**: `--hsm check` detects TPM2 (`/dev/tpmrm0`,
+    `/dev/tpm0`), YubiKey (`ykman`/`ykchalresp`), and Secure Enclave
+    (macOS); native key *operations* need the vendor stacks, which are not
+    yet linked. Detection reports honestly instead of silently
+    downgrading. ❨target: tpm2-tss, ykman, SE SDK integration❩.
 
 ---
 
-## 8. Terminal Operational Security
+## 7. Groups — Null-MLS (TreeKEM)
 
-### 8.1 Anti-Forensic Terminal Buffer
-
-- Enters alternate screen buffer on startup (`\x1b[?1049h`)
-- Disables scrollback (`\x1b[?47l`)
-- Disables bracketed paste by default; enables only when user explicitly requests paste
-- On exit: clears screen, clears scrollback, overwrites terminal history buffer
-- Bypasses shell history by reading directly from `/dev/tty` (not stdin)
-
-### 8.2 Clipboard Sanitization
-
-- Auto-clear system clipboard **5 seconds** after any copy operation
-- On Linux: clears `xclip` / `wl-copy` / `termux-clipboard-set` buffers
-- On macOS: clears `pbcopy` pasteboard
-- On Windows: clears `clip` / `SetClipboardData`
-- Warns user if clipboard manager (e.g., CopyQ, Ditto) is detected
-
-### 8.3 Secure Input Mode
-
-Optional `--secure-input` flag:
-- Reads directly from `/dev/input/event*` (Linux) or `IOHID` (macOS) to bypass terminal keyloggers
-- Disables terminal echo entirely
-- Requires root/admin privileges
-
-### 8.4 Duress & Decoy Mechanisms
-
-| Feature | Trigger | Behavior |
-|---------|---------|----------|
-| **Duress PIN** | User enters `/lock <wrong_pin>` | Wipes all keys silently, shows fake "connection timeout" |
-| **Decoy Mode** | Launch with `null --safe` | Opens benign IRC-like interface; real session hidden behind `/unlock <real_pin>` |
-| **Dead Man's Switch** | Configurable (default: 30 min idle) | Auto-wipe keys and exit |
-| **USBGuard** | Unknown USB insertion | Immediate panic wipe |
-| **Screen Lock** | `/lock` command or idle timeout | Blurs TUI, requires PIN to resume |
-
-### 8.5 Anti-Screenshot
-
-- On Wayland: uses `zwp_idle_inhibit` + avoids `wlroots` screencopy protocols
-- On macOS: requests `kCGWindowSharingNone` where supported
-- On Windows: uses `SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)` (Win10 2004+)
+- Complete binary ratchet tree in heap indexing; internal nodes carry
+  ML-KEM-1024 keypairs derived deterministically from path secrets
+  (HKDF-SHA384, labels `null-mls-node`/`null-mls-path`/`null-mls-root`).
+- Commits refresh the committer's direct path, sealing each path secret to
+  the sibling subtrees' **resolutions** (minimal non-blank cover) —
+  **O(log n) encapsulations**, proven by test: 3 bundles at depth 3 for
+  8 members (vs 8 one-per-member).
+- Removal blanks the removed leaf and its off-path nodes; resolutions route
+  around blanks (PCS for the remaining members). Epochs hash-chain
+  (`prev_hash`), so forks, gaps, and replays are rejected (`"commit does
+  not chain to current epoch"`). Removed members become `defunct` and all
+  operations fail loudly.
+- Welcome packages carry roster + public tree + joiner path, sealed to the
+  joiner's KeyPackage ek via Kyber encapsulation + ChaCha20-Poly1305
+  (`null-mls-welcome-wrap`). Roster, tree, and path arrive together (TOFU
+  by necessity).
+- Sender chains advance per member with `message_key = HKDF(tree_secret,
+  salt=group_id, info=sender ‖ seq ‖ epoch)`; recipients prune chains so
+  committers and receivers stay sequence-aligned.
+- Limits and guards: up to **50000** members (`MAX_GROUP_MEMBERS`);
+  declared depth capped at **20** at decode time (absurd-depth DoS guard);
+  add/remove/bundle counts bounded on the wire. MLS-*shaped*, not RFC 9420;
+  no interop claim.
+- A malicious committer can always withhold commits (deny service) —
+  availability from a malicious insider is not claimed.
 
 ---
 
-## 9. Build & Distribution Security
+## 8. Updates & Supply Chain
 
-### 9.1 Reproducible Builds (SLSA Level 3)
-
-- Deterministic compilation via `cargo` with pinned dependency hashes (`Cargo.lock` committed)
-- Build environment containerized with pinned toolchain versions
-- Reproducible build verification: any user can rebuild from source and verify hash matches release binary
-- Signed with **Sigstore** (cosign) for supply chain transparency
-
-### 9.2 Post-Quantum Code Signing
-
-- Release binaries signed with **hybrid signature**: Ed25519 + SPHINCS+-SHA2-128s
-- Signature verification built into the binary itself (self-check on startup)
-- Downgrade protection via monotonic version counter in signed manifest
-
-### 9.3 Anonymous Update Distribution
-
-- Primary: Static Tor onion service (`.onion` address hardcoded in source, verified via safety number)
-- Secondary: P2P gossip protocol—connected peers can propagate signed update packages
-- Update manifest includes:
-  - Version number (monotonic, 64-bit)
-  - Binary hash (SHA3-256)
-  - Hybrid signature (Ed25519 + SPHINCS+)
-  - Dependency hash tree (Cargo.lock digest)
-- No HTTP requests, no DNS lookups, no telemetry
+- **Hybrid signatures**: Ed25519 **and** SLH-DSA-SHA2-128s (FIPS 205)
+  over `"{version}:{sha3_256_hex}"`; both must verify. Binary hash +
+  `Cargo.lock` digest (`sha3_256_hex(cargo_lock)`) pinned in the manifest.
+- **Downgrade floor**: `version < min_version` is rejected
+  (`NullError::Downgrade`); offers must be strictly newer.
+- **Distribution**: signature-checked P2P gossip (payload =
+  `manifest ‖ 0x00 ‖ binary`, newest-verified wins regardless of who
+  delivered it); manifests ≤ 1 MiB at parse.
+  ❨target: primary distribution over a static `.onion` service — verify
+  path exists, the fetch path is an integration point, not shipped❩.
+- **Reproducible builds**: `cargo xtask repro` builds `--bin null` twice
+  (isolated target dirs, `SOURCE_DATE_EPOCH=0`, `TZ=UTC`, `LC_ALL=C`) and
+  compares SHA256 — verified bit-identical.
+  ❨target: sigstore/cosign attestation of release binaries + SBOM — the
+  signing scheme for manifests is shipped; artifact attestation is
+  release-process work❩.
+- **License hygiene**: MIT OR Apache-2.0 workspace-wide.
 
 ---
 
-## 10. Group Messaging: Null-MLS
+## 9. Formal Verification & Audit Status
 
-For multi-party communication, Null implements **Messaging Layer Security (MLS)** with post-quantum cipher suites:
-
-- **TreeKEM** for efficient group key evolution (O(log n) rekeying cost)
-- **KeyPackage** using ML-KEM-1024 + ML-DSA-65
-- **Sender ratchet** per member for forward secrecy within groups
-- **Welcome message** encrypted to new members via Kyber KEM
-- Group size: up to 50,000 members (MLS protocol limit)
-- Metadata minimization: group ID is a 32-byte random value; no server-side roster
-
----
-
-## 11. Formal Verification & Audit
-
-### 11.1 Protocol Verification
-
-The Null Triple Ratchet (NTR) is formally modeled and verified:
+The honest status table. "Proof" means an automated-verifier result; the
+rest is covered by tests/KATs/fuzz and stated as such.
 
 | Property | Tool | Status |
-|----------|------|--------|
-| Message secrecy (classical) | Tamarin Prover | Required |
-| Message secrecy (quantum) | Tamarin Prover (PQ extension) | Required |
-| Post-compromise security | Tamarin Prover | Required |
-| Authentication (when enabled) | ProVerif | Required |
-| Deniability | Game-based proof (manual) | Required |
-| Key independence | Tamarin Prover | Required |
+|---|---|---|
+| Establishment secrecy (no KEM key leaked) | Tamarin `root_secrecy` | **Proven** (handshake) |
+| Initiator KCI resistance | Tamarin `kci_initiator` | **Proven** (handshake) |
+| Verified-PINNED mutual agreement | Tamarin `mutual_agreement` | **Proven** (handshake; TOFU excluded by design) |
+| Honest deniable + verified runs complete | `hs_executable`, `verified_executable` | **Proven** (exists-trace sanity) |
+| Ratchet message secrecy / FS / PQ-PCS after rekey | Tamarin (`model/ratchet.spthy`) | **In progress** — modelled line-for-line, chain-update proofs diverge under default heuristics; covered today by 91 tests, KAT vectors, fuzz |
+| Deniability | `docs/deniability.md` + frame tripwire test | Classical argument documented; observational-equivalence proof **not claimed** |
+| Deniable-responder KCI | — | **False by construction** (anyone can encapsulate to B); deliberately no lemma |
+| TreeKEM PCS / fork / gap / replay | Tests | Chaos-tested, not machine-proved |
+| No silent downgrade | `downgrade.rs` 10-case matrix | Tested |
+| Memory safety of `unsafe` (15 sites) | Rust + audit-scope review | miri ❨target❩ — not run (nightly) |
+| Constant-time message paths | dudect ❨target❩ | Not run |
+| Sanitizer fuzzing | cargo-fuzz + ASan/etc. ❨target❩ | Stable-channel corpus shipped instead |
 
-### 11.2 Implementation Audit
+### Model↔code correspondence
 
-- Memory safety: Rust's ownership model + `miri` testing for unsafe blocks
-- Constant-time verification: `dudect` statistical testing for timing side-channels
-- Fuzzing: `cargo-fuzz` on frame parser, crypto engine, and transport multiplexer
-- Symbolic execution: `KLEE` on critical C FFI boundaries (Tor controller, seccomp)
+Every abstraction the Tamarin models assume is checked against
+`null-crypto` by same-named unit tests; the audit checklist lives in
+`docs/audit-scope.md` §5. Anything the models do not cover (deniability,
+anonymity, side channels, groups, loss recovery) is stated as out of scope
+rather than silently assumed.
 
 ---
 
-## 12. Operational Flow
+## 10. Operational Flow
 
 ```
-┌──────────┐    ┌──────────────┐    ┌──────────────┐    ┌─────────────────┐
-│ $ null   │───►│ Spin up TUI, │───►│ Paste peer's │───►│ /quit or CTRL+C │
-│          │    │ HSM init,    │    │ null://      │    │                 │
-│          │    │ Tor/I2P/Nym, │    │ Triple       │    │ 3-pass memory   │
-│          │    │ Ephem PQ     │    │ handshake,   │    │ wipe, screen    │
-│          │    │ keys         │    │ NTR active   │    │ clear, exit 0   │
-└──────────┘    └──────────────┘    └──────────────┘    └─────────────────┘
+$ null ──► bootstrap (transports, HSM, hibernation check)
+         ──► discovery (paste peer's null:// · out-of-band)
+         ──► handshake (deniable or verified-pinned)
+         ──► NTR active: shaped 2048B frames + cover traffic
+         ──► exit: goodbye + drain → 3-pass wipe → exit 0
 ```
 
-**Session Lifecycle:**
-1. **Bootstrap** (0-5s): Initialize HSM, spawn transports, generate ephemeral keys
-2. **Discovery** (5-15s): Exchange null:// strings out-of-band; handshake completes
-3. **Communication** (ongoing): Triple ratchet encrypts all traffic; token-bucket shapes frames
-4. **Termination** (<100ms): Panic wipe triggered by any exit condition
+In-chat: `/quit` (goodbye + drain + wipe) · `/lock` · `/unlock` ·
+`/copy` (clipboard auto-clears in 5s). TUI: demo PIN `1234`, duress
+`0000`, Esc quits, Ctrl-C wipes.
 
 ---
 
-## 13. Compliance & Standards Mapping
+## 11. Standards & Framework Mapping
 
-| Standard / Framework | Null Compliance |
-|---------------------|-----------------|
-| NIST FIPS 203 (ML-KEM) | Kyber-1024 |
-| NIST FIPS 204 (ML-DSA) | ML-DSA-65 (optional identity) |
-| NIST FIPS 205 (SLH-DSA) | SPHINCS+-SHA2-128s (signing) |
-| IETF MLS (RFC 9420) | Null-MLS group chat |
-| Apple PQ3 Level 3 | Triple ratchet with ongoing Kyber rekeying |
-| SLSA Level 3 | Reproducible builds, Sigstore signing |
-| Common Criteria EAL4+ | Target for HSM integration |
-
----
-
-## 14. Summary of SOTA Differentiators
-
-| Capability | Null v2.0 | Classical Messengers | Signal | Apple PQ3 |
-|------------|-----------|---------------------|--------|-----------|
-| Ongoing PQ ratcheting | ✅ Triple ratchet | ❌ | ❌ | ✅ PQ3 |
-| Multi-transport (Tor/I2P/Nym) | ✅ Auto-fallback | ❌ | ❌ | ❌ |
-| Formal verification | ✅ Tamarin/ProVerif | Rare | Partial | ✅ |
-| HSM key isolation | ✅ TPM/Secure Enclave/YubiKey | ❌ | ❌ | ✅ Secure Enclave |
-| Reproducible builds | ✅ SLSA L3 | Rare | ❌ | ❌ |
-| Anonymous updates | ✅ Onion + P2P gossip | ❌ | ❌ | ❌ |
-| Pure terminal / zero GUI | ✅ Ratatui | ❌ | ❌ | ❌ |
-| Deniable by default | ✅ 3DH | ❌ | ❌ | ❌ |
-| Duress/decoy mechanisms | ✅ Multi-layer | ❌ | ❌ | ❌ |
-| Traffic shaping + mimicry | ✅ Token-bucket + jitter | ❌ | ❌ | ❌ |
+| Standard / Framework | Null's relation |
+|---|---|
+| NIST FIPS 203 (ML-KEM) | ML-KEM-1024 (Kyber-1024) at handshake + periodic rekey |
+| NIST FIPS 204 (ML-DSA) | ML-DSA-65 opt-in verified identities |
+| NIST FIPS 205 (SLH-DSA) | SLH-DSA-SHA2-128s hybrid release signatures |
+| IETF MLS (RFC 9420 family) | **Inspired-by**, not conformant; no interop claim |
+| Apple PQ3 Level 3 | Ongoing PQ rekeying inside a continuous ratchet — analogous, independently implemented |
+| SLSA | Reproducible builds verified in-repo; attestation ❨target❩ |
+| RFC 7748 / RFC 5869 / RFC 8439 | X25519, HKDF, ChaCha20-Poly1305 primitives |
 
 ---
 
-**Null v2.0** is not merely an encrypted messenger—it is a **provably secure, formally verified, post-quantum, censorship-resistant communication system** that operates entirely within volatile memory, leaves no forensic trace, and adapts to any network condition. It represents the convergence of modern cryptography, systems security, and operational tradecraft into a single terminal-native application.
+## 12. SOTA Differentiators — Verified vs Target
+
+| Capability | Null (shipped) | Null (target) | Mainstream E2E apps |
+|---|---|---|---|
+| Ongoing PQ ratcheting | ✅ Triple ratchet (ECDH+Kyber+chain) | — | ❌ |
+| Multi-transport Tor/I2P/Nym/PT | ✅ Auto-failover | — | ❌ |
+| Formal verification | ✅ Handshake, 5/5 lemmas | Ratchet proofs | Rare/partial |
+| HSM key isolation | ✅ Tier-1 RAM + Tier-2 probe | Native TPM/SE/YubiKey ops | ✅ (mobile OS tiers) |
+| Reproducible builds | ✅ Verified bit-identical | Sigstore + SBOM | ❌ |
+| Hybrid-signed updates | ✅ Ed25519 + SLH-DSA, gossip | Onion fetch channel | ❌ |
+| Terminal-native, zero GUI | ✅ Ratatui + line REPL | — | ❌ |
+| Deniable by default | ✅ (classical argument) | PQ-deniability models | ❌ |
+| Duress/decoy/USBGuard | ✅ | — | ❌ |
+| Fixed-frame shaping + cover | ✅ | — | ❌ |
+
+---
+
+## 13. Source of Truth Map
+
+| Topic | Where it lives |
+|---|---|
+| Protocol constants, frame geometry, rekey policy | `crates/null-core/src/lib.rs` |
+| Handshake + ratchet + identity crypto | `crates/null-crypto/src/lib.rs` |
+| Framing, shaping, dummies | `crates/null-frame/src/lib.rs` |
+| Session pipeline, inbox recovery | `crates/null-session/src/lib.rs` |
+| Transports, multiplexer, live dialing | `crates/null-transport/src/lib.rs` |
+| Memory wipe, HSM, sleep protection | `crates/null-memory/src/lib.rs` |
+| Safety numbers, transparency, device sets | `crates/null-identity/src/lib.rs` |
+| TreeKEM groups | `crates/null-group/src/lib.rs` (+ `tree.rs`) |
+| Signed updates, gossip | `crates/null-update/src/lib.rs` |
+| Binary entry points | `crates/null-cli/src/main.rs`, `crates/null-tui/src/lib.rs` |
+| Tamarin models | `model/handshake.spthy` (5/5 proven), `model/ratchet.spthy` (in progress), `model/ntr.spthy` (legacy) |
+| KAT vectors | `vectors/` |
+| Threat model, deniability, audit scope, ops | `docs/` |
+
+**Null v2.0** is a provably-secure *establishment layer*, an engineered
+triple-ratchet *message layer* under active formalization, a
+censorship-resistant *transport layer*, and a RAM-only *endpoint story* —
+with every gap between those claims and the code named in this document
+and its companions in `docs/`.
