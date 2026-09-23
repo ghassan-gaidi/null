@@ -22,8 +22,9 @@ fn main() -> Result<()> {
             let check = std::env::args().nth(2).as_deref() == Some("--check");
             kat(check)
         }
+        "doccheck" => doccheck(),
         _ => {
-            println!("usage: cargo xtask <repro|fuzz [iters] [seed]|kat [--check]>");
+            println!("usage: cargo xtask <repro|fuzz [iters] [seed]|kat [--check]|doccheck>");
             Ok(())
         }
     }
@@ -382,4 +383,96 @@ fn kat(check: bool) -> Result<()> {
         files.len()
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Doc-lint gate: the documentation must agree with the code's ground truth.
+// `cargo xtask doccheck` fails when a documented constant or the test count
+// drifts from the source. Runs in CI so claims can never silently rot.
+// ---------------------------------------------------------------------------
+
+/// Count `#[test]` and `#[tokio::test]` attributes under `crates/` and
+/// `xtask/`. This is the exact number `cargo test` reports for all targets.
+fn count_test_attributes() -> Result<usize> {
+    fn walk(dir: &std::path::Path, out: &mut usize) -> Result<()> {
+        for entry in std::fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out)?;
+            } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+                let src = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
+                *out += src.lines().filter(|l| l.trim_start().starts_with("#[test]") || l.trim_start().starts_with("#[tokio::test]")).count();
+            }
+        }
+        Ok(())
+    }
+    let mut n = 0usize;
+    walk(std::path::Path::new("crates"), &mut n)?;
+    walk(std::path::Path::new("xtask"), &mut n)?;
+    Ok(n)
+}
+
+/// Assert that a set of "ground truth" strings (sourced from `null-core`'s
+/// constants at build time) appear in the documentation files that must
+/// carry them, and that the docs' stated test count equals the source's.
+fn doccheck() -> Result<()> {
+    use null_core::{
+        CLIPBOARD_CLEAR_SECS, DEAD_MAN_SWITCH_SECS, FRAME_HEADER_SIZE, FRAME_SIZE,
+        KYBER_REKEY_INTERVAL_MSGS, KYBER_REKEY_INTERVAL_SECS, MAX_GROUP_MEMBERS,
+        MAX_PAYLOAD_SIZE, PROTOCOL_VERSION, SHAPER_BASE_INTERVAL_MS, SHAPER_BURST, TAG_SIZE,
+    };
+
+    // (label, exact string the docs must contain, files that must contain it)
+    let constants: &[(&str, String, &[&str])] = &[
+        ("protocol version", format!("0x{:04x}", PROTOCOL_VERSION), &["README.md", "SUMMARY.md", "docs/wire-protocol.md"]),
+        ("frame size", FRAME_SIZE.to_string(), &["README.md", "SUMMARY.md", "docs/wire-protocol.md"]),
+        ("frame header size", FRAME_HEADER_SIZE.to_string(), &["docs/wire-protocol.md"]),
+        ("max payload size", MAX_PAYLOAD_SIZE.to_string(), &["docs/wire-protocol.md"]),
+        ("aead tag size", TAG_SIZE.to_string(), &["docs/wire-protocol.md"]),
+        ("kyber rekey interval (msgs)", KYBER_REKEY_INTERVAL_MSGS.to_string(), &["README.md", "SUMMARY.md", "docs/crypto.md", "docs/security-posture.md", "docs/testing.md"]),
+        ("kyber rekey interval (secs)", KYBER_REKEY_INTERVAL_SECS.to_string(), &["SUMMARY.md", "docs/crypto.md", "docs/security-posture.md"]),
+        ("shaper base interval (ms)", SHAPER_BASE_INTERVAL_MS.to_string(), &["docs/transports.md", "docs/testing.md"]),
+        ("shaper burst", SHAPER_BURST.to_string(), &["README.md", "docs/transports.md"]),
+        ("clipboard clear (secs)", CLIPBOARD_CLEAR_SECS.to_string(), &["README.md", "docs/cli.md", "docs/memory-hardening.md"]),
+        ("dead-man switch (secs)", DEAD_MAN_SWITCH_SECS.to_string(), &["SUMMARY.md", "docs/cli.md", "docs/memory-hardening.md"]),
+        ("max group members", MAX_GROUP_MEMBERS.to_string(), &["SUMMARY.md", "docs/groups.md"]),
+    ];
+
+    let mut failures: Vec<String> = Vec::new();
+    for (label, needle, files) in constants {
+        for file in *files {
+            let body =
+                std::fs::read_to_string(file).with_context(|| format!("read {file}"))?;
+            if !body.contains(needle.as_str()) {
+                failures.push(format!(
+                    "{label} (`{needle}`) not found in {file} — update the doc, not the code"
+                ));
+            }
+        }
+    }
+
+    let tests = count_test_attributes()?;
+    let test_docs: &[&str] = &[
+        "README.md",
+        "SUMMARY.md",
+        "docs/audit-scope.md",
+        "docs/testing.md",
+        "docs/security-posture.md",
+    ];
+    for file in test_docs {
+        let body = std::fs::read_to_string(file).with_context(|| format!("read {file}"))?;
+        if !body.contains(&tests.to_string()) {
+            failures.push(format!(
+                "test count ({tests}) not found in {file} — reflect the true count in the docs"
+            ));
+        }
+    }
+
+    if failures.is_empty() {
+        println!("DOC-CHECK-OK constants={} tests={tests}", constants.len());
+        Ok(())
+    } else {
+        anyhow::bail!("DOC-LINT FAILED ({})\n  {}", failures.len(), failures.join("\n  "))
+    }
 }

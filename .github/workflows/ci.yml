@@ -13,3 +13,5 @@ jobs:
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo run --locked -p xtask -- fuzz 20000
+      - run: cargo run --locked -p xtask -- kat --check
+      - run: cargo run --locked -p xtask -- doccheck
