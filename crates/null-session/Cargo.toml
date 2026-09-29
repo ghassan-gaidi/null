@@ -15,3 +15,4 @@ null-transport = { workspace = true }
 null-identity = { workspace = true }
 null-group = { workspace = true }
 tokio = { workspace = true }
+proptest = { workspace = true }

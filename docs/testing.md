@@ -12,15 +12,17 @@ failure mode.
 | Frames | 2048B codec, padding, version/type rejection, shaper | `null-frame` (5 tests) |
 | Core types | constants, `FrameType`, `TransportKind`, `ConnectionString` | `null-core` (3 tests) |
 | Identity | safety number, QR, transparency, DeviceSet | `null-identity` (7 tests) |
-| Session | pack/unpack, rekey-at-50, resync, Inbox recovery, goodbye | `null-session` (7 in-crate + 4 integration files) |
+| Session | pack/unpack, rekey-at-50, resync, Inbox recovery, goodbye | `null-session` (7 in-crate + 5 integration files) |
 | TUI | key routing, lock/unlock, duress, copy-clear | `null-tui` |
 | Group | TreeKEM commits, welcomes, removal, forks | `null-group` |
 | Update | hybrid sigs, downgrade floor, gossip | `null-update` |
 | CLI | two-process chats, pty TUI sessions | `null-cli` |
 
-**91** test attributes workspace-wide (`#[test]` + `#[tokio::test]`),
-enforced by `cargo xtask doccheck`: if the docs ever stop matching the
-source count, CI fails.
+**92** test attributes workspace-wide (`#[test]` + `#[tokio::test]`,
+including the `#[test]` inside the `ratchet_interleave.rs` `proptest!`
+block), enforced by `cargo xtask doccheck`: if the docs ever stop
+matching the source count, CI fails. The proptest itself runs 128
+randomized flows per execution.
 
 ## 2. Cryptographic properties → evidence
 
@@ -32,6 +34,7 @@ source count, CI fails.
 | Deniable-by-default (no signature bytes) | `deniability.rs` frame tripwire ("ML-DSA-65 vk (1952B) + signature (3309B) = 5261B minimum delta") | cargo test |
 | Ratchet roundtrip + out-of-order | encrypt/decrypt interleavings, skipped-key cache (window `MAX_SKIP = 200`) | cargo test |
 | Rekey trigger | `rekey_trigger_at_50` in crypto; session test `rekey_fires_at_50_and_heals_over_frames` — message 51 carries KyberRekey + Data | cargo test |
+| Interleaved ratchet (stateful fuzz) | `ratchet_interleave.rs` proptest: 128 randomized alternating A↔B flows through handshake + frames + rekey boundary, asserting lossless ordered exact-match delivery and counter discipline both ways | cargo test |
 | Rekey interval | constants `KYBER_REKEY_INTERVAL_MSGS = 50`, `KYBER_REKEY_INTERVAL_SECS = 604800`; doc-lint pins docs to code | doccheck |
 | Lossless rekey recovery | Inbox: `MissedRekey` buffer (cap `MAX_PENDING = 16`), replay within `RETAINED_REKEYS = 8`, hard fail after `MAX_REKEY_ROUNDS = 3` "re-handshake required" | cargo test |
 | No silent downgrade | `downgrade.rs` 10-case matrix (stripped init/sig/vk, version rollback, handshake-as-data, replay, rekey-as-data, control sanity) | cargo test |
@@ -94,6 +97,9 @@ source count, CI fails.
 
 - `ci.yml`: fmt → build → test → clippy `-D warnings` → fuzz 20000 → kat
   `--check` → doccheck, on every push/PR.
+- `supply-chain.yml`: cargo-audit (RustSec) weekly + on manifest/lock
+  changes, and cargo-deny `bans`/`licenses`/`sources` fail-closed gates
+  (see `deny.toml`).
 - `tamarin.yml`: on `model/**` changes only — Maude 3.5.1 + prover 1.12.0
   (both sha256-pinned), proves `handshake.spthy` 5/5, parse-checks
   `ratchet.spthy`/`ntr.spthy`. Separate job so prover flakiness can never
