@@ -5,7 +5,7 @@
 //! Async transport I/O stays with the caller; this module never touches
 //! the net and leaves zero forensic residue beyond its stack buffers.
 
-use null_core::{FrameType, PROTOCOL_VERSION};
+use null_core::{FrameType, FRAME_SIZE, PROTOCOL_VERSION};
 use null_crypto::{EncryptedMessage, HandshakeInit, HandshakeResponse, Session};
 use null_frame::Frame;
 
@@ -285,6 +285,31 @@ impl Inbox {
         self.pending.len()
     }
 
+    /// Feed one blob — one or more whole 2048B frames back-to-back (§6.3
+    /// fan-out batching). Equivalent to [`Inbox::receive`] on a
+    /// single-frame blob; multi-frame blobs are processed in order with
+    /// their results merged (first notice wins, texts and outbound
+    /// concatenated, goodbye latched).
+    pub fn receive_batch(&mut self, blob: &[u8], ad: &[u8]) -> anyhow::Result<InboxOut> {
+        if blob.is_empty() || blob.len() % FRAME_SIZE != 0 {
+            return Err(anyhow::anyhow!(
+                "blob {} is not a whole number of frames",
+                blob.len()
+            ));
+        }
+        let mut out = InboxOut::default();
+        for chunk in blob.chunks(FRAME_SIZE) {
+            let partial = self.receive(chunk, ad)?;
+            if partial.notice.is_some() && out.notice.is_none() {
+                out.notice = partial.notice;
+            }
+            out.outbound.extend(partial.outbound);
+            out.texts.extend(partial.texts);
+            out.goodbye |= partial.goodbye;
+        }
+        Ok(out)
+    }
+
     /// Feed one raw 2048B frame. `outbound` frames must be transmitted in
     /// order (rekey replays / requests); `texts` holds all newly readable
     /// plaintexts; `notice` carries operator-visible drop/heal events.
@@ -554,6 +579,40 @@ mod tests {
             _ => panic!("expected response"),
         }
         let _ = init;
+    }
+
+    #[test]
+    fn receive_batch_aggregates_multi_frame_blob_in_order() {
+        let (mut ia, mut ib) = inbox_pair();
+        let ad = ad_for("alice", "bob");
+        // A sends "first" at gen 0 (1 frame), then explicitly rekeys (gen
+        // 0->1) and sends "second" (1 Data frame at gen 1). Packing the
+        // rekey immediately before that Data frame yields one 3-frame blob
+        // mixing Data + KyberRekey + Data — exactly what fan-out batching
+        // coalesces into a single length-prefixed write.
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&pack_data(ia.session_mut(), b"first", &ad).unwrap()[0].encode());
+        let ct = ia.session_mut().kyber_rekey_initiate().unwrap();
+        let rekey = Frame::new(FrameType::KyberRekey, ia.session_mut().send_counter(), ct).unwrap();
+        blob.extend_from_slice(&rekey.encode());
+        blob.extend_from_slice(&pack_data(ia.session_mut(), b"second", &ad).unwrap()[0].encode());
+        assert_eq!(blob.len() % 2048, 0);
+        assert_eq!(blob.len(), 3 * 2048, "expected a 3-frame blob");
+        // One call, both texts in order (drain_inbound/receive-loop path).
+        let out = ib.receive_batch(&blob, &ad).unwrap();
+        assert_eq!(out.texts, vec![b"first".to_vec(), b"second".to_vec()]);
+        assert!(out.outbound.is_empty());
+        assert!(!out.goodbye);
+        // Single-frame blobs still behave exactly like `receive`.
+        let one = pack_data(ib.session_mut(), b"reply", &ad).unwrap();
+        let single = one[0].encode();
+        let out2 = ia.receive_batch(&single, &ad).unwrap();
+        assert_eq!(out2.texts, vec![b"reply".to_vec()]);
+        // Alignment is enforced: half-frame blobs are rejected outright.
+        let mut bad = single.clone();
+        bad.truncate(bad.len() - 1);
+        assert!(ia.receive_batch(&bad, &ad).is_err());
+        assert!(ia.receive_batch(&[], &ad).is_err());
     }
 
     #[test]

@@ -6,7 +6,7 @@
 //! Real-network dial paths are implemented; integration tests requiring
 //! live daemons are gated behind `NULL_LIVE_TRANSPORT=1`.
 
-use null_core::{NullError, Result, TransportKind};
+use null_core::{NullError, Result, TransportKind, BLOB_MAX_BYTES};
 use rand::{rngs::OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -80,7 +80,7 @@ impl TransportConn {
             .stream
             .as_mut()
             .ok_or_else(|| NullError::Transport("no live stream (stub circuit)".into()))?;
-        if bytes.len() > 16 * 1024 * 1024 {
+        if bytes.len() > BLOB_MAX_BYTES {
             return Err(NullError::Transport("blob too large".into()));
         }
         s.write_all(&(bytes.len() as u32).to_be_bytes())
@@ -89,6 +89,28 @@ impl TransportConn {
         s.write_all(bytes)
             .await
             .map_err(|e| NullError::Transport(format!("send: {e}")))?;
+        Ok(())
+    }
+
+    /// Batch-write frames as one or more blobs (§6.3 fan-out batching).
+    /// Everything up to the 16 MiB blob cap goes out in a single
+    /// length-prefixed write; larger sets are split on whole-frame
+    /// boundaries (BLOB_MAX_BYTES is a multiple of FRAME_SIZE, so a blob
+    /// never straddles a frame) so receivers can always chop blobs back
+    /// into frames.
+    pub async fn send_frames<F: AsRef<[u8]>>(&mut self, encoded_frames: &[F]) -> Result<()> {
+        let mut blob = Vec::with_capacity(BLOB_MAX_BYTES.min(64 * 1024));
+        for f in encoded_frames {
+            let e = f.as_ref();
+            if !blob.is_empty() && blob.len() + e.len() > BLOB_MAX_BYTES {
+                self.send_blob(&blob).await?;
+                blob.clear();
+            }
+            blob.extend_from_slice(e);
+        }
+        if !blob.is_empty() {
+            self.send_blob(&blob).await?;
+        }
         Ok(())
     }
 
@@ -105,7 +127,7 @@ impl TransportConn {
             .map_err(|_| NullError::Transport("recv timeout".into()))?
             .map_err(|e| NullError::Transport(format!("recv: {e}")))?;
         let n = u32::from_be_bytes(len_b) as usize;
-        if n > 16 * 1024 * 1024 {
+        if n > BLOB_MAX_BYTES {
             return Err(NullError::Transport("blob too large".into()));
         }
         let mut buf = vec![0u8; n];
@@ -658,5 +680,51 @@ mod tests {
         b.send_raw(vec![4, 5]).unwrap();
         assert_eq!(b.recv_raw().await.unwrap(), vec![1, 2, 3]);
         assert_eq!(a.recv_raw().await.unwrap(), vec![4, 5]);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn send_frames_splits_at_blob_cap() {
+        use null_frame::Frame;
+        // 9000 frames: 8192 fill the first blob to exactly 16 MiB, the
+        // remaining 808 flush as a second blob — one length-prefixed write
+        // per blob, frame-aligned throughout.
+        const N: usize = 9000;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let ep = Endpoint {
+            onion_host: "t".into(),
+            port: 1,
+        };
+        let server_ep = ep.clone();
+        // The reader runs in its own task: the writer cannot make progress
+        // (loopback backpressure) unless someone drains the socket.
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut c = TransportConn::new_live(TransportKind::Tor, server_ep, stream);
+            let mut got = 0usize;
+            let mut blobs = 0usize;
+            while got < N {
+                match c.recv_blob().await {
+                    Ok(b) => {
+                        blobs += 1;
+                        assert_eq!(b.len() % 2048, 0, "blob not frame-aligned");
+                        assert!(b.len() <= BLOB_MAX_BYTES);
+                        assert_eq!(b.len() / 2048, 8192.min(N - got), "blob cap or remainder");
+                        got += b.len() / 2048;
+                    }
+                    Err(_) => break,
+                }
+            }
+            (got, blobs)
+        });
+        let client_stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut client = TransportConn::new_live(TransportKind::Tor, ep.clone(), client_stream);
+        let enc: Vec<Vec<u8>> = (0..N).map(|i| Frame::dummy(i as u64).encode()).collect();
+        client.send_frames(&enc).await.unwrap();
+        drop(client); // FIN after the last blob
+
+        let (got, blobs) = server.await.unwrap();
+        assert_eq!(got, N, "all frames arrived");
+        assert_eq!(blobs, 2, "{N} frames exceed one 8192-frame blob");
     }
 }

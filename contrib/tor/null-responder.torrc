@@ -1,0 +1,49 @@
+# Null responder onion service.
+#
+# Tor reads /etc/tor/torrc; this file is meant to be included from it
+# (`%include /etc/tor/null-responder.torrc`) or run with
+# `tor -f contrib/tor/null-responder.torrc` in a container. See
+# contrib/README.md for the install steps.
+
+# --- v3 onion service -------------------------------------------------------
+# Persistent address: the hostname file is the responder's contact point.
+# v3 (the default since Tor 0.4.8; spell it out so an old tor cannot
+# silently negotiate v2).
+HiddenServiceVersion 3
+HiddenServiceDir /var/lib/tor/null-responder
+
+# Map the onion service's port 80 to the local responder. The initiator
+# always dials <onion>:80, so only the local side should change.
+HiddenServicePort 80 127.0.0.1:8077
+
+# Stealth: do not publish this service in the HSDir consensus. An
+# unpublished service is still reachable by anyone holding the address,
+# so this is traffic-analysis resistance only — the peer's identity is
+# established by the safety number, not by the address being secret.
+HiddenServiceNonAnonymousMode 0
+
+# --- client-side posture ----------------------------------------------------
+# Keep the client usable for other services on the same daemon; these
+# settings only bound what *this* daemon does.
+SocksPort 9050
+SocksPolicy accept 127.0.0.1
+SocksPolicy reject *
+
+# Do not advertise this relay. A Null onion host is a service, not a
+# contribution to the network.
+ORPort 0
+DirPort 0
+ExitRelay 0
+PublishServerDescriptor 0
+
+# --- logging posture --------------------------------------------------------
+# Enough to debug bootstrap failures; note that connection-level logs can
+# become a traffic-analysis side channel for whoever can read them.
+Log notice stdout
+SafeLogging 1
+AvoidDiskWrites 1
+
+# --- optional: reject dangerous traffic -------------------------------------
+# A messaging onion service has no business reaching the clearnet.
+# Uncomment to make the service a dead end even if code is compromised.
+#ClientRejectInternalAddresses 1

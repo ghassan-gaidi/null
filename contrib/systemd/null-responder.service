@@ -1,0 +1,52 @@
+[Unit]
+Description=Null responder (one inbound session, then wipe and exit)
+Documentation=file:///usr/share/doc/null/contrib-runbook.md
+After=network-online.target tor.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Null's responder is one session per process: it binds 127.0.0.1:8077,
+# serves exactly one inbound handshake, and wipes + exits when that peer
+# leaves. The restart policy below turns that into "always ready for the
+# next session".
+#
+# A pty is mandatory: both chat modes read stdin, and EOF on stdin makes
+# Null send a goodbye frame and exit. `StandardInput=null` would therefore
+# kill the responder instantly. tmux supplies the pty and a way for the
+# operator to attach and talk to the peer.
+ExecStart=/usr/bin/tmux new-session -d -s null-responder /usr/local/bin/null --listen 8077 --auto-lock-secs 1800
+ExecStopPost=-/usr/bin/tmux kill-session -t null-responder
+Restart=on-failure
+RestartSec=5
+# Bind in front of a local Tor onion service (see tor/null-responder.torrc).
+# Attach with: tmux attach -t null-responder
+
+# --- hardening --------------------------------------------------------------
+# The responder holds session keys in RAM only. Nothing here should ever be
+# able to write to disk, spawn a shell, or widen its syscall surface.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+# Session keys never reach the journal, but the null:// string does — treat
+# journal access as contact-address access, not as key material.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=null-responder
+
+[Install]
+WantedBy=multi-user.target

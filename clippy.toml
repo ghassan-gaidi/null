@@ -1,0 +1,4 @@
+# Clippy reads the declared MSRV so lints that suggest newer stdlib APIs
+# (e.g. `is_multiple_of`, stable in 1.87) do not fire on a workspace that
+# still supports 1.75. Keep in sync with `rust-version` in Cargo.toml.
+msrv = "1.75"

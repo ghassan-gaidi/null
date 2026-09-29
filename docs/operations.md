@@ -58,6 +58,31 @@ NULL_LIVE_TRANSPORT=1 null --peer 'null://<onion-host>.onion?k=<b64>&i=<ml-dsa:f
    distribute bridge lines out-of-band to clients. The client-side config
    here is just the dialing half.
 
+### Copy-pasteable configs
+
+`contrib/` holds the shapes we test against, so deployment is
+copy-edit-run rather than improvisation: `contrib/tor/null-responder.torrc`
+(persistent v3 onion service), `contrib/tor/bridge-client.torrc` (PT
+dialing), `contrib/tor/bridge-server-obfs4.torrc` (bridge relay side),
+`contrib/systemd/null-responder.service` (supervised responder), and
+`contrib/systemd/obfs4proxy-server.service`. Start with
+`contrib/README.md`.
+
+Two operational facts the templates encode, because getting them wrong
+looks like "Null is broken":
+
+- **The responder serves one session per process.** It binds
+  `127.0.0.1:<port>`, serves exactly one inbound handshake, then wipes and
+  exits when that peer leaves. Supervise it; do not expect a resident
+  daemon.
+- **The responder needs a TTY.** Both chat modes read stdin, and EOF there
+  means "send goodbye and exit", so a unit with `StandardInput=null`
+  exits immediately. The shipped unit runs it under `tmux` for a real pty.
+  Null has no headless receive-only mode.
+
+A bridge changes *who can reach* your onion service; it is not an
+authentication factor. Peer identity is the safety number's job (§4).
+
 ## 4. Verified deployments (authentication)
 
 - Every participant's `null://` string must carry `i=<ml-dsa:fingerprint>`

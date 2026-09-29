@@ -9,16 +9,17 @@ failure mode.
 | Layer | Unit area | Where |
 |---|---|---|
 | Crypto primitives | X25519 rejection, Kyber roundtrips, HKDF chains, identity, key lengths | `null-crypto` (14 tests) |
-| Frames | 2048B codec, padding, version/type rejection, shaper | `null-frame` (5 tests) |
+| Frames | 2048B codec, padding, version/type rejection, shaper, blob batching | `null-frame` (7 tests) |
 | Core types | constants, `FrameType`, `TransportKind`, `ConnectionString` | `null-core` (3 tests) |
 | Identity | safety number, QR, transparency, DeviceSet | `null-identity` (7 tests) |
-| Session | pack/unpack, rekey-at-50, resync, Inbox recovery, goodbye | `null-session` (7 in-crate + 5 integration files) |
+| Session | pack/unpack, rekey-at-50, resync, Inbox recovery, goodbye, blob batching | `null-session` (8 in-crate + 5 integration files) |
 | TUI | key routing, lock/unlock, duress, copy-clear | `null-tui` |
 | Group | TreeKEM commits, welcomes, removal, forks | `null-group` |
 | Update | hybrid sigs, downgrade floor, gossip | `null-update` |
+| Transport | multiplexer, obfs4, loopback, blob batching cap | `null-transport` (11 tests) |
 | CLI | two-process chats, pty TUI sessions | `null-cli` |
 
-**92** test attributes workspace-wide (`#[test]` + `#[tokio::test]`,
+**96** test attributes workspace-wide (`#[test]` + `#[tokio::test]`,
 including the `#[test]` inside the `ratchet_interleave.rs` `proptest!`
 block), enforced by `cargo xtask doccheck`: if the docs ever stop
 matching the source count, CI fails. The proptest itself runs 128
@@ -50,6 +51,7 @@ randomized flows per execution.
 | Live two-process chats + pty-driven TUI (loopback and live listener) | `null-cli` tests |
 | Goodbye + drain (no RST loss) | quit-path tests: goodbye frame first, ~2 s inbound drain |
 | Traffic shaping | `TrafficShaper`: capacity `5` burst, refill 0.5/s (`SHAPER_BASE_INTERVAL_MS = 2000`), uniform 1–3 s clamped 0.5–4 s; dummy frames at shaped rate during idle | cargo test |
+| Fan-out blob batching | `encode_batch`/`decode_batch` round-trip + alignment rejection; `receive_batch_aggregates_multi_frame_blob_in_order` (Data+KyberRekey+Data in one blob, order preserved); `send_frames_splits_at_blob_cap` (9000 frames → 2 blobs, 8192-frame cap, frame-aligned) | cargo test |
 
 ## 4. Groups → evidence
 

@@ -409,8 +409,14 @@ fn count_test_attributes() -> Result<usize> {
                 *out += src
                     .lines()
                     .filter(|l| {
-                        l.trim_start().starts_with("#[test]")
-                            || l.trim_start().starts_with("#[tokio::test]")
+                        // `#[tokio::test]` may carry a runtime flavor
+                        // (`#[tokio::test(flavor = "multi_thread", …)]`);
+                        // match the attribute name, not the whole line, so
+                        // the count stays equal to what `cargo test` runs.
+                        let t = l.trim_start();
+                        t.starts_with("#[test]")
+                            || t.starts_with("#[tokio::test]")
+                            || t.starts_with("#[tokio::test(")
                     })
                     .count();
             }

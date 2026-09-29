@@ -1,0 +1,43 @@
+[Unit]
+Description=obfs4 pluggable-transport server (bridge sidecar)
+Documentation=https://gitlab.torproject.org/tpo/core/obfs4proxy
+# The bridge's transport is useless without the relay in front of it, and
+# the relay is useless without this sidecar. Start them together.
+After=network-online.target tor.service
+Wants=network-online.target
+Before=tor.service
+
+[Service]
+Type=simple
+# Server mode of the same package the client installs. tor execs this
+# binary itself when ServerTransportPlugin is configured (see
+# tor/bridge-server-obfs4.torrc); this unit exists for the case where you
+# want the sidecar supervised separately or exposed under systemd. If tor
+# manages the PT itself, do NOT enable this unit as well — two processes
+# binding the same port is a fight, and the loser is silently ignored.
+#
+# Only enable it when your torrc does NOT exec obfs4proxy as a PT.
+#ExecStart=/usr/bin/obfs4proxy --server --logFile=syslog --disableLogging --addr 0.0.0.0:443
+
+# --- hardening --------------------------------------------------------------
+# Tor needs a pty-free, non-privileged process with no filesystem needs
+# beyond its own binary.
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

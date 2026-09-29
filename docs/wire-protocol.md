@@ -45,6 +45,21 @@ blob := u32 BE length ‖ bytes          (length ≤ 16 MiB)
 "logical unit" (a handshake fragment, a padded frame, or the multi-frame
 handshake sequence) may span several blobs; each blob is one encoded 2048-byte frame or one handshake fragment.
 
+### Fan-out batching
+
+A blob is a *transport* container, not a protocol unit, so it may carry
+**one or more whole 2048-byte frames back to back** (≤ 8192 frames =
+`BLOB_MAX_BYTES` = 16 MiB; the cap is an exact multiple of `FRAME_SIZE`,
+so a blob can never straddle a frame). Senders coalesce per-message and
+per-peer frame sets through `TransportConn::send_frames` — one
+length-prefixed write instead of one write per frame — which is what
+multi-device/group fan-out (`fanout_pack`) and rekey-replay bursts use.
+Receivers split with `Inbox::receive_batch`, which is byte-for-byte
+equivalent to `Inbox::receive` on a single-frame blob and rejects any blob
+whose length is not a whole number of frames. Wire-visible behaviour is
+unchanged: peers built before batching still interoperate, because
+single-frame blobs remain valid.
+
 ## 3. Frame layout (fixed 2048 bytes)
 
 ```

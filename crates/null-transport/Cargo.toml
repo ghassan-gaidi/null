@@ -11,3 +11,6 @@ serde.workspace = true
 tokio.workspace = true
 rand.workspace = true
 sha2 = "0.10"
+
+[dev-dependencies]
+null-frame = { workspace = true }

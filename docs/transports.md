@@ -115,9 +115,13 @@ Bridge <bridge_line>
 ```
 
 Without a sidecar the dial fails closed with exactly this remediation
-text. Rendezvous/front-domain values in the current code are placeholders
+text. Note that the PT *name* and the shipped *binary* differ
+(`obfs4` → `obfs4proxy`, `snowflake` → `snowflake-client`,
+`webtunnel` → `webtunnel-client`), which the emitted lines get right —
+Tor's plugin name is `obfs4`, not `obfs4proxy`. Rendezvous/front-domain
+values in the current code are placeholders
 (`snowflake-null-rendezvous`, `cdn.null.invalid`) — see `docs/operations.md`
-for the deployment runbook.
+and `contrib/` for the deployment runbook.
 
 obfs4 also ships a scrambling layer for the stub path: a uniform-DH-style
 keystream `SHA256(secret ‖ counter)` XOR applied in 32-byte blocks,

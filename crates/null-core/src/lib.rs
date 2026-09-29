@@ -15,6 +15,10 @@ pub const FRAME_HEADER_SIZE: usize = 32;
 /// Max encrypted payload bytes per frame (ciphertext incl. the 16B
 /// Poly1305 tag): 2048 - 32 header - 16 tag - 16 margin.
 pub const MAX_PAYLOAD_SIZE: usize = 1984;
+/// Max bytes in one length-prefixed transport blob (16 MiB, §6.3). A blob
+/// carries 1..=8192 whole 2048B frames, so fan-out batches coalesce many
+/// frames into one write without ever losing frame alignment.
+pub const BLOB_MAX_BYTES: usize = 16 * 1024 * 1024;
 /// Poly1305 tag length.
 pub const TAG_SIZE: usize = 16;
 /// Kyber re-encapsulation interval: message count (§4.2).

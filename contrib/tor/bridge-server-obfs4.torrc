@@ -1,0 +1,44 @@
+# Operator-run obfs4 bridge (the SERVER half).
+#
+# A bridge is a Tor relay whose traffic is wrapped in a pluggable
+# transport so a censor cannot fingerprint or block it by protocol. Null
+# does not ship a bridge; if you run one, you are running a piece of the
+# Tor network and you own its patching, uptime, and abuse handling.
+#
+# Validated with `tor --verify-config -f <this file>` before reload.
+
+User debian-tor
+DataDirectory /var/lib/tor
+
+# --- relay ------------------------------------------------------------------
+BridgeRelay 1
+# The ORPort is only reachable through the transport, never directly.
+ORPort 9001
+# No directory cache, no exit traffic: keep the blast radius small if this
+# host is ever compromised.
+DirPort 0
+ExitRelay 0
+PublishServerDescriptor bridges
+BridgeRelay 1
+
+# --- the transport ----------------------------------------------------------
+# The PT server binary is the SAME package as the client binary.
+ServerTransportPlugin obfs4 exec /usr/bin/obfs4proxy
+ServerTransportListenAddr obfs4 0.0.0.0:443
+
+# Set these to the address clients can actually reach, and keep them in sync
+# with your published bridge line. A wrong advertise port is the classic
+# "bridge connects nowhere" failure.
+#BridgeAdvertiseIP 203.0.113.10
+#BridgeAdvertisePort 443
+#ServerTransportBridge obfs4 203.0.113.10:443
+
+# --- hygiene ----------------------------------------------------------------
+ExitRelay 0
+PublishServerDescriptor bridges
+SocksPort 0
+# Connection-level logs are a traffic-analysis side channel; keep them at
+# notice or lower and forward them off-host if you keep them at all.
+Log notice stdout
+SafeLogging 1
+AvoidDiskWrites 1

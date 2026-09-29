@@ -1,0 +1,41 @@
+# Client-side bridge dialing for a Null deployment.
+#
+# Include from your torrc (`%include /etc/tor/bridge-client.torrc`) or pass
+# with `tor -f`. Obtained lines come from your bridge operator; the shapes
+# below are the ones `torrc_bridge_lines` prints as remediation text.
+#
+# Nothing here changes Null's protocol: the responder's onion address and
+# the null:// string are identical whether you dial directly or through a
+# bridge. A bridge only changes the path to that address.
+
+User tor
+SocksPort 9050
+SocksPolicy accept 127.0.0.1
+SocksPolicy reject *
+
+UseBridges 1
+# The PT *name* is obfs4; the binary Debian/Ubuntu ships is obfs4proxy.
+# Getting this pair wrong is the single most common bridge misconfiguration,
+# and Tor fails closed with a plugin log rather than connecting in clear.
+ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy
+
+# --- obfs4 ------------------------------------------------------------------
+# Replace with the line your operator gave you, verbatim. The certificate
+# argument is what pins the bridge's identity to the line; a mismatched or
+# missing cert is rejected, which is the point.
+#Bridge obfs4 203.0.113.10:443 0123456789ABCDEF… cert=Zm9vYmFy… iat-mode=0
+
+# --- snowflake (WebRTC) ----------------------------------------------------
+# ClientTransportPlugin snowflake exec /usr/bin/snowflake-client
+# Bridge snowflake 192.0.2.5:1
+#   iat-mode=0
+#   bridge=cdn.example.invalid:443
+#   front=front.example.invalid:443
+#   ice=stun:stun.example.invalid:3478
+
+# --- WebTunnel --------------------------------------------------------------
+# ClientTransportPlugin webtunnel exec /usr/bin/webtunnel-client
+# Bridge webtunnel wss://cdn.example.invalid/ ws://front.example.invalid/
+
+Log notice stdout
+SafeLogging 1

@@ -6,7 +6,8 @@
 //! ```
 
 use null_core::{
-    FrameType, NullError, Result, FRAME_HEADER_SIZE, FRAME_SIZE, MAX_PAYLOAD_SIZE, PROTOCOL_VERSION,
+    FrameType, NullError, Result, BLOB_MAX_BYTES, FRAME_HEADER_SIZE, FRAME_SIZE, MAX_PAYLOAD_SIZE,
+    PROTOCOL_VERSION,
 };
 use rand::{rngs::OsRng, RngCore};
 use std::time::{Duration, Instant};
@@ -80,6 +81,37 @@ impl Frame {
             counter,
             payload,
         })
+    }
+
+    /// Batch-encode frames into one length-prefixed blob (§6.3). Frames are
+    /// exactly FRAME_SIZE bytes and the blob cap is BLOB_MAX_BYTES (a whole
+    /// number of frames), so alignment is preserved by construction.
+    pub fn encode_batch(frames: &[Frame]) -> Result<Vec<u8>> {
+        let n = frames.len();
+        if n > BLOB_MAX_BYTES / FRAME_SIZE {
+            return Err(NullError::Frame(format!(
+                "{n} frames exceed one blob ({})",
+                BLOB_MAX_BYTES / FRAME_SIZE
+            )));
+        }
+        let mut out = Vec::with_capacity(n * FRAME_SIZE);
+        for f in frames {
+            out.extend_from_slice(&f.encode());
+        }
+        Ok(out)
+    }
+
+    /// Inverse of [`Frame::encode_batch`]: split a blob back into whole
+    /// frames. Rejects any blob whose length is not a multiple of
+    /// FRAME_SIZE (a receiver can round-trip a single-frame blob unchanged).
+    pub fn decode_batch(raw: &[u8]) -> Result<Vec<Frame>> {
+        if raw.is_empty() || raw.len() % FRAME_SIZE != 0 {
+            return Err(NullError::Frame(format!(
+                "blob {} is not a whole number of frames",
+                raw.len()
+            )));
+        }
+        raw.chunks(FRAME_SIZE).map(Frame::decode).collect()
     }
 }
 
@@ -172,5 +204,36 @@ mod tests {
             assert!(s.try_consume());
         }
         assert!(!s.try_consume());
+    }
+
+    #[test]
+    fn encode_batch_roundtrips() {
+        let frames = [
+            Frame::new(FrameType::Data, 7, vec![1u8; 40]).unwrap(),
+            Frame::dummy(8),
+            Frame::new(FrameType::KyberRekey, 9, vec![2u8; 1300]).unwrap(),
+        ];
+        let blob = Frame::encode_batch(&frames).unwrap();
+        assert_eq!(blob.len(), 3 * FRAME_SIZE);
+        // Every frame survives a batch round-trip, order intact.
+        let back = Frame::decode_batch(&blob).unwrap();
+        assert_eq!(back.len(), 3);
+        for (a, b) in frames.iter().zip(&back) {
+            assert_eq!(a.counter, b.counter);
+            assert_eq!(a.payload, b.payload);
+        }
+        // One blob is, by construction, a whole number of frames here.
+        assert_eq!(blob.len() % FRAME_SIZE, 0);
+        assert_eq!(blob.len(), (blob.len() / FRAME_SIZE) * FRAME_SIZE);
+    }
+
+    #[test]
+    fn decode_batch_rejects_non_multiple_of_frame_size() {
+        // 1.5 frames: length is not a multiple of FRAME_SIZE.
+        let mut raw = Frame::dummy(0).encode();
+        raw.extend_from_slice(&[0u8; FRAME_SIZE / 2]);
+        assert!(Frame::decode_batch(&raw).is_err());
+        // Empty blobs are not frames.
+        assert!(Frame::decode_batch(&[]).is_err());
     }
 }

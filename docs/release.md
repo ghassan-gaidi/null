@@ -14,13 +14,23 @@ cargo test --workspace --locked
 cargo run --locked -p xtask -- fuzz           # 20k+ iterations
 cargo run --locked -p xtask -- kat --check
 cargo run --locked -p xtask -- doccheck
+cargo run -p xtask -- prover --check          # pinned Tamarin/Maude install intact
+cargo deny check advisories licenses bans sources   # deny.toml, fail-closed
+cargo audit                                   # RustSec: 0 vulnerabilities
 cargo run -p xtask -- repro                    # bit-identical double build
 ```
 
-CI (`ci.yml`) enforces everything except `repro`, which is run manually at
-release time so the double-build linkage to the actual tagged commit is
-explicit. Tamarin (`tamarin.yml`) re-proves the handshake models if
-`model/**` changed in the release window.
+`prover --check` matters only if you intend to re-run or extend the
+symbolic proofs; it verifies the sha256-pinned Maude + tamarin-prover
+install (`model/prover-install.sh`) instead of trusting whatever happens
+to be on `PATH`. The two supply-chain gates are fail-closed: a
+known-vulnerable crate, a license outside the allow-list, an unexpected
+source, or a duplicate is a release blocker, not a warning to triage
+later. CI (`ci.yml`) enforces the code gates and `supply-chain.yml`
+enforces the last two on a weekly + manifest-change schedule; `repro` is
+run manually at release time so the double-build linkage to the actual
+tagged commit is explicit. Tamarin (`tamarin.yml`) re-proves the
+handshake models if `model/**` changed in the release window.
 
 ## 2. Reproducibility ceremony
 

@@ -4,7 +4,7 @@ mod secure_input;
 
 use anyhow::Result;
 use clap::Parser;
-use null_core::ConnectionString;
+use null_core::{ConnectionString, FRAME_SIZE};
 use null_transport::{Endpoint, Multiplexer};
 
 #[derive(Parser, Debug)]
@@ -586,20 +586,31 @@ async fn live_handshake(
         Some(id) => HandshakeInitiator::initiate_verified(&ek_bytes, id, id.device_id(0))?,
         None => HandshakeInitiator::initiate(&ek_bytes)?,
     };
-    for frame in pack_handshake_init(&init_msg)? {
-        conn.send_blob(&frame.encode()).await?;
-    }
+    let frames = pack_handshake_init(&init_msg)?
+        .iter()
+        .map(|f| f.encode())
+        .collect::<Vec<_>>();
+    conn.send_frames(&frames).await?;
     eprintln!("[null] handshake init sent; awaiting peer response…");
     let mut re = HandshakeReassembler::new();
     let resp = loop {
         let raw = conn.recv_blob().await?;
         // Data frames here would be a peer bug (no session yet) — reject.
-        match re.add_raw(&raw)? {
-            Some(HandshakeMsg::Response(r)) => break r,
-            Some(HandshakeMsg::Init(_)) => {
-                anyhow::bail!("peer replied with init (responder-only mode unsupported)")
+        let mut done = None;
+        for chunk in raw.chunks(FRAME_SIZE) {
+            match re.add_raw(chunk)? {
+                Some(HandshakeMsg::Response(r)) => {
+                    done = Some(r);
+                    break;
+                }
+                Some(HandshakeMsg::Init(_)) => {
+                    anyhow::bail!("peer replied with init (responder-only mode unsupported)")
+                }
+                None => {}
             }
-            None => continue,
+        }
+        if let Some(r) = done {
+            break r;
         }
     };
     let session = match &own_id {
@@ -739,21 +750,32 @@ async fn run_listener(
     let mut re = HandshakeReassembler::new();
     let init = loop {
         let raw = conn.recv_blob().await?;
-        match re.add_raw(&raw)? {
-            Some(HandshakeMsg::Init(i)) => break i,
-            Some(HandshakeMsg::Response(_)) => {
-                anyhow::bail!("unexpected response on listener (two initiators?)")
+        let mut done = None;
+        for chunk in raw.chunks(FRAME_SIZE) {
+            match re.add_raw(chunk)? {
+                Some(HandshakeMsg::Init(i)) => {
+                    done = Some(i);
+                    break;
+                }
+                Some(HandshakeMsg::Response(_)) => {
+                    anyhow::bail!("unexpected response on listener (two initiators?)")
+                }
+                None => {}
             }
-            None => continue,
+        }
+        if let Some(i) = done {
+            break i;
         }
     };
     let (resp, session, _) = match &own_id {
         Some(id) => respond_verified(&init, &own_kp, id, None, id.device_id(0))?,
         None => respond(&init, &own_kp)?,
     };
-    for frame in pack_handshake_response(&resp)? {
-        conn.send_blob(&frame.encode()).await?;
-    }
+    let resp_frames = pack_handshake_response(&resp)?
+        .iter()
+        .map(|f| f.encode())
+        .collect::<Vec<_>>();
+    conn.send_frames(&resp_frames).await?;
     eprintln!("[null] session established (triple ratchet active)");
     if verified {
         // Same vk pair as the initiator attests (canonical sort inside
@@ -899,12 +921,13 @@ async fn chat_loop(
                         secure_exit();
                     }
                 };
-                let out = inbox.receive(&raw, ad_in)?;
+                let out = inbox.receive_batch(&raw, ad_in)?;
                 if let Some(n) = out.notice {
                     eprintln!("[null] resync: {n}");
                 }
-                for f in &out.outbound {
-                    conn.send_blob(&f.encode()).await?;
+                let ob = out.outbound.iter().map(|f| f.encode()).collect::<Vec<_>>();
+                if !ob.is_empty() {
+                    conn.send_frames(&ob).await?;
                 }
                 for pt in &out.texts {
                     last_activity = std::time::Instant::now();
@@ -953,12 +976,14 @@ async fn chat_loop(
                     }
                     continue;
                 }
-                for f in pack_data(inbox.session_mut(), cmd.as_bytes(), ad_out)? {
-                    if !shaper.try_consume() {
-                        tokio::time::sleep(TrafficShaper::next_delay()).await;
-                    }
-                    conn.send_blob(&f.encode()).await?;
+                let frames = pack_data(inbox.session_mut(), cmd.as_bytes(), ad_out)?
+                    .iter()
+                    .map(|f| f.encode())
+                    .collect::<Vec<_>>();
+                if !shaper.try_consume() {
+                    tokio::time::sleep(TrafficShaper::next_delay()).await;
                 }
+                conn.send_frames(&frames).await?;
             }
         }
     }
@@ -993,7 +1018,7 @@ async fn drain_inbound(
             break;
         }
         match tokio::time::timeout(remaining, conn.recv_blob()).await {
-            Ok(Ok(raw)) => match inbox.receive(&raw, ad_in) {
+            Ok(Ok(raw)) => match inbox.receive_batch(&raw, ad_in) {
                 Ok(out) => {
                     for pt in &out.texts {
                         eprintln!("[peer] {}", String::from_utf8_lossy(pt));
@@ -1075,12 +1100,18 @@ async fn chat_loop_tui(
                             app.set_notice("copied; clears in 5s");
                         }
                         AppAction::Send(text) => {
-                            for f in pack_data(inbox.session_mut(), text.as_bytes(), ad_out)? {
-                                if !shaper.try_consume() {
-                                    tokio::time::sleep(TrafficShaper::next_delay()).await;
-                                }
-                                conn.send_blob(&f.encode()).await?;
+                            let frames = pack_data(
+                                inbox.session_mut(),
+                                text.as_bytes(),
+                                ad_out,
+                            )?
+                            .iter()
+                            .map(|f| f.encode())
+                            .collect::<Vec<_>>();
+                            if !shaper.try_consume() {
+                                tokio::time::sleep(TrafficShaper::next_delay()).await;
                             }
+                            conn.send_frames(&frames).await?;
                         }
                     }
                 }
@@ -1095,12 +1126,13 @@ async fn chat_loop_tui(
                         secure_exit();
                     }
                 };
-                let out = inbox.receive(&raw, ad_in)?;
+                let out = inbox.receive_batch(&raw, ad_in)?;
                 if let Some(n) = out.notice {
                     app.set_notice(format!("resync: {n}"));
                 }
-                for f in &out.outbound {
-                    conn.send_blob(&f.encode()).await?;
+                let ob = out.outbound.iter().map(|f| f.encode()).collect::<Vec<_>>();
+                if !ob.is_empty() {
+                    conn.send_frames(&ob).await?;
                 }
                 for pt in &out.texts {
                     app.push_message("peer", &String::from_utf8_lossy(pt));

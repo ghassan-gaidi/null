@@ -253,10 +253,25 @@ pub fn ensure_pt(binary: &str) -> Result<String> {
     Ok(text.lines().next().unwrap_or("").to_string())
 }
 
+/// Canonical on-disk name of the pluggable-transport client binary for a
+/// PT kind. Tor's plugin *name* and the shipped binary name differ
+/// (Debian/Ubuntu install `obfs4proxy` for the `obfs4` plugin), so
+/// emitting `/usr/bin/<kind>` alone would hand operators a line that
+/// cannot start.
+pub fn pt_client_binary(kind: &str) -> &str {
+    match kind {
+        "obfs4" => "obfs4proxy",
+        "snowflake" => "snowflake-client",
+        "webtunnel" => "webtunnel-client",
+        other => other,
+    }
+}
+
 /// Recommended `torrc` client lines for a bridge transport.
 pub fn torrc_bridge_lines(kind: &str, bridge_line: &str) -> String {
     format!(
-        "UseBridges 1\nClientTransportPlugin {kind} exec /usr/bin/{kind}\nBridge {bridge_line}\n"
+        "UseBridges 1\nClientTransportPlugin {kind} exec /usr/bin/{}\nBridge {bridge_line}\n",
+        pt_client_binary(kind)
     )
 }
 
@@ -361,6 +376,13 @@ mod tests {
         let s = torrc_bridge_lines("obfs4", "obfs4 1.2.3.4:443 CERT=abc");
         assert!(s.contains("UseBridges 1"));
         assert!(s.contains("Bridge obfs4"));
+        // The PT *name* is obfs4 but the shipped binary is obfs4proxy — the
+        // emitted line must name the binary that actually exists.
+        assert!(s.contains("ClientTransportPlugin obfs4 exec /usr/bin/obfs4proxy"));
+        assert!(torrc_bridge_lines("snowflake", "snowflake 1.2.3.4:443 x")
+            .contains("/usr/bin/snowflake-client"));
+        // Unknown kinds pass through unchanged (custom PT binaries).
+        assert!(torrc_bridge_lines("mypt", "mypt 1.2.3.4:9 x").contains("/usr/bin/mypt"));
     }
 
     #[tokio::test]
