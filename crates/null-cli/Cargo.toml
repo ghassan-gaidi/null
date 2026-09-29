@@ -2,6 +2,7 @@
 name = "null-cli"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "null"
@@ -22,5 +23,5 @@ anyhow = "1"
 signal-hook = "0.3"
 libc = "0.2"
 base64 = "0.22"
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"

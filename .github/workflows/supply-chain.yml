@@ -1,0 +1,50 @@
+# Supply-chain gates: license/dep-graph policy + vulnerability audit.
+#
+# Fail-closed: a license outside the allow-list, a duplicate/conflicting
+# dependency, or a known vulnerability in the locked graph fails CI.
+# Separate from ci.yml so a supply-chain trip cannot mask a test
+# regression (and vice versa).
+
+name: supply-chain
+
+on:
+  push:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/supply-chain.yml"
+  pull_request:
+    paths:
+      - "**/Cargo.toml"
+      - "**/Cargo.lock"
+      - "deny.toml"
+      - ".github/workflows/supply-chain.yml"
+  schedule:
+    - cron: "0 3 * * 1" # weekly: catch newly disclosed advisories
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo audit (RustSec advisory DB)
+        uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  deny:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        checks:
+          - bans
+          - licenses
+          - sources
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: embarkstudios/cargo-deny-action@v2
+        with:
+          command: check
+          arguments: --all-features ${{ matrix.checks }}

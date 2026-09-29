@@ -32,16 +32,33 @@ pub fn safety_number(ik_a: &[u8], ik_b: &[u8], session_id: &[u8]) -> String {
 }
 
 /// Render safety number as ASCII QR (for TUI in-person verification).
-/// Uses the `qrcode` crate to produce block-art.
+/// Uses the `qrcodegen` crate (Nayuki) — no image dependency, matching the
+/// workspace's minimal-dependency posture.
 pub fn safety_number_qr_ascii(safety_number: &str) -> Result<String> {
-    use qrcode::QrCode;
-    let code = QrCode::new(safety_number.as_bytes())
+    use qrcodegen::{QrCode, QrCodeEcc};
+    let code = QrCode::encode_binary(safety_number.as_bytes(), QrCodeEcc::Medium)
         .map_err(|e| NullError::Identity(format!("qr: {e}")))?;
-    Ok(code
-        .render::<char>()
-        .quiet_zone(false)
-        .module_dimensions(2, 1)
-        .build())
+    // Half-block rendering, 2x horizontal scale (preserves the previous
+    // block-art look): '█' both rows, '▀' top only, '▄' bottom only.
+    let size = code.size();
+    let out_cap: usize = (size as usize) * (size as usize / 2 + 1) * 3;
+    let mut out = String::with_capacity(out_cap);
+    for by in (0..size).step_by(2) {
+        for x in 0..size {
+            let top = code.get_module(x, by);
+            let bottom = code.get_module(x, by + 1);
+            let ch = match (top, bottom) {
+                (true, true) => '█',
+                (true, false) => '▀',
+                (false, true) => '▄',
+                (false, false) => ' ',
+            };
+            out.push(ch);
+            out.push(ch);
+        }
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 /// Group member id for one device: `SHA3-256("Null-v2.0-device-member:" ‖

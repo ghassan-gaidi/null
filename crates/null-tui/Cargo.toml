@@ -2,8 +2,9 @@
 name = "null-tui"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 null-core = { workspace = true }
-ratatui = "0.29"
+ratatui = "0.30"
 crossterm = "0.28"

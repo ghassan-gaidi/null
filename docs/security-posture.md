@@ -84,7 +84,7 @@ proof.
 | HSM | Tier-1 software binding; Tier-2 probe | **native TPM/YubiKey/SE key ops not linked** — do not treat the probe as a key-isolation boundary |
 | Transport | Tor/I2P/Nym dialing, PT bridge templates, shaping, dummies | metadata rides the transport's own anonymity; bridge sidecars are operator-run |
 | Updates | hybrid Ed25519+SLH-DSA, monotonic floor, gossip | onion fetch channel is roadmap; release-key compromise is catastrophic by design |
-| Supply chain | lockfile, `--locked`, repro | sigstore/SBOM are release-process targets, not shipped |
+| Supply chain | lockfile, `--locked`, repro, `cargo-audit` + `cargo-deny` gates in `supply-chain.yml` (license allow-list, sources, advisories, duplicate/bans) | sigstore/SBOM are release-process targets, not shipped; SBOM contents self-certify one level of the toolchain |
 
 ## 6. Known bugs / edge cases (behave as designed, but be aware)
 

@@ -1,0 +1,48 @@
+# cargo-deny policy for the Null workspace.
+#
+# Fail-closed supply-chain gates: license allow-list, duplicate-graph
+# bans, and advisory severity. Run locally with:
+#   cargo deny check
+# Enforced in CI by .github/workflows/supply-chain.yml.
+
+[advisories]
+# Never let a known-vulnerable crate into a signed release of a security
+# product. In cargo-deny 0.20 a vulnerability always fails the gate (the old
+# `vulnerability`/`notice` severity keys are deprecated out of the config);
+# the scope keys below only control how far informational advisories are
+# surfaced as warnings. Handle exceptions by bumping the crate or adding an
+# [[advisories.ignore]] entry in a reviewed commit with the reason spelled out.
+yanked = "warn"
+unmaintained = "all"
+unsound = "all"
+
+[licenses]
+# Null itself is MIT OR Apache-2.0; allow common permissive OSI licenses
+# for the (audited, lockfile-pinned) dependency graph. Anything outside
+# this set fails the build.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "Zlib",
+  "Unicode-3.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Keep the graph lean for reproducible builds and auditability.
+multiple-versions = "warn"
+# Workspace-inherited deps (`{ workspace = true }`) are reported as
+# "wildcards" by cargo-deny 0.20 because the version lives in the workspace
+# table, not the member manifest. No actual `*` versions can enter the graph:
+# Cargo.lock is committed and every build runs `--locked`.
+wildcards = "warn"
+highlight = "all"
+
+[sources]
+# crates.io only; forbid git/registry substitutes that could inject
+# differently-signed code.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

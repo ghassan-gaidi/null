@@ -2,9 +2,10 @@
 name = "null-identity"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 null-core = { workspace = true }
 sha3 = "0.10"
 thiserror.workspace = true
-qrcode = "0.7"
+qrcodegen = "1.8"

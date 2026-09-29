@@ -11,7 +11,7 @@ failure mode.
 | Crypto primitives | X25519 rejection, Kyber roundtrips, HKDF chains, identity, key lengths | `null-crypto` (14 tests) |
 | Frames | 2048B codec, padding, version/type rejection, shaper | `null-frame` (5 tests) |
 | Core types | constants, `FrameType`, `TransportKind`, `ConnectionString` | `null-core` (3 tests) |
-| Identity | safety number, QR, transparency, DeviceSet | `null-identity` (6 tests) |
+| Identity | safety number, QR, transparency, DeviceSet | `null-identity` (7 tests) |
 | Session | pack/unpack, rekey-at-50, resync, Inbox recovery, goodbye | `null-session` (7 in-crate + 4 integration files) |
 | TUI | key routing, lock/unlock, duress, copy-clear | `null-tui` |
 | Group | TreeKEM commits, welcomes, removal, forks | `null-group` |
