@@ -40,15 +40,34 @@ oracle/sources-annotated proof lands, ratchet behavior is covered by
 ## Run it
 
 ```bash
-# Ubuntu: Maude 3.5.1 from the pinned zip, prover from the pinned 1.12.0 asset
-# (sha256 verified in CI; see the workflow for exact commands).
+# Hermetic install (Linux), sha256-pinned Maude 3.5.1 + prover 1.12.0:
+./model/prover-install.sh [dest]        # writes <dest>/env.sh + pins.sha256
+source prover-env/env.sh                # PATH + MAUDE_LIB
+
+# Prove the handshake theory and parse-check the rest:
 tamarin-prover --prove model/handshake.spthy
-# Single lemma, e.g.:
 tamarin-prover --prove=mutual_agreement model/handshake.spthy
-# Parse-check the rest:
 tamarin-prover --parse-only model/ratchet.spthy
 tamarin-prover --parse-only model/ntr.spthy
 ```
+
+### Hermetic prover toolchain
+
+`model/prover-install.sh` rebuilds the exact prover environment CI uses:
+Maude 3.5.1 + tamarin-prover 1.12.0, both downloaded from pinned
+releases and **sha256-verified against the same digests as
+`.github/workflows/tamarin.yml`** — a substituted download fails loudly
+instead of silently proving the wrong thing. The installed tree records
+its checksums in `pins.sha256`, and
+
+```bash
+cargo run --locked -p xtask -- prover --check   # release ceremony gate
+```
+
+verifies that the pinned install is intact and both binaries run (Maude
+on PATH/MAUDE_LIB exactly as `env.sh` sets them), failing the release
+ceremony if anything is missing or tampered with. `NULL_PROVER_DIR` or a
+path argument overrides the default search (`./prover-env`, `/tmp/prover`).
 
 CI (`.github/workflows/tamarin.yml`) downloads the pinned prover release
 (with sha256 check), installs Maude via apt, and proves the whole file

@@ -23,8 +23,9 @@ fn main() -> Result<()> {
             kat(check)
         }
         "doccheck" => doccheck(),
+        "prover" => prover_check(),
         _ => {
-            println!("usage: cargo xtask <repro|fuzz [iters] [seed]|kat [--check]|doccheck>");
+            println!("usage: cargo xtask <repro|fuzz [iters] [seed]|kat [--check]|doccheck|prover [--check] [DIR]>");
             Ok(())
         }
     }
@@ -395,14 +396,23 @@ fn kat(check: bool) -> Result<()> {
 /// `xtask/`. This is the exact number `cargo test` reports for all targets.
 fn count_test_attributes() -> Result<usize> {
     fn walk(dir: &std::path::Path, out: &mut usize) -> Result<()> {
-        for entry in std::fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))? {
+        for entry in
+            std::fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))?
+        {
             let entry = entry?;
             let path = entry.path();
             if path.is_dir() {
                 walk(&path, out)?;
             } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
-                let src = std::fs::read_to_string(&path).with_context(|| format!("read {}", path.display()))?;
-                *out += src.lines().filter(|l| l.trim_start().starts_with("#[test]") || l.trim_start().starts_with("#[tokio::test]")).count();
+                let src = std::fs::read_to_string(&path)
+                    .with_context(|| format!("read {}", path.display()))?;
+                *out += src
+                    .lines()
+                    .filter(|l| {
+                        l.trim_start().starts_with("#[test]")
+                            || l.trim_start().starts_with("#[tokio::test]")
+                    })
+                    .count();
             }
         }
         Ok(())
@@ -419,31 +429,84 @@ fn count_test_attributes() -> Result<usize> {
 fn doccheck() -> Result<()> {
     use null_core::{
         CLIPBOARD_CLEAR_SECS, DEAD_MAN_SWITCH_SECS, FRAME_HEADER_SIZE, FRAME_SIZE,
-        KYBER_REKEY_INTERVAL_MSGS, KYBER_REKEY_INTERVAL_SECS, MAX_GROUP_MEMBERS,
-        MAX_PAYLOAD_SIZE, PROTOCOL_VERSION, SHAPER_BASE_INTERVAL_MS, SHAPER_BURST, TAG_SIZE,
+        KYBER_REKEY_INTERVAL_MSGS, KYBER_REKEY_INTERVAL_SECS, MAX_GROUP_MEMBERS, MAX_PAYLOAD_SIZE,
+        PROTOCOL_VERSION, SHAPER_BASE_INTERVAL_MS, SHAPER_BURST, TAG_SIZE,
     };
 
     // (label, exact string the docs must contain, files that must contain it)
     let constants: &[(&str, String, &[&str])] = &[
-        ("protocol version", format!("0x{:04x}", PROTOCOL_VERSION), &["README.md", "SUMMARY.md", "docs/wire-protocol.md"]),
-        ("frame size", FRAME_SIZE.to_string(), &["README.md", "SUMMARY.md", "docs/wire-protocol.md"]),
-        ("frame header size", FRAME_HEADER_SIZE.to_string(), &["docs/wire-protocol.md"]),
-        ("max payload size", MAX_PAYLOAD_SIZE.to_string(), &["docs/wire-protocol.md"]),
-        ("aead tag size", TAG_SIZE.to_string(), &["docs/wire-protocol.md"]),
-        ("kyber rekey interval (msgs)", KYBER_REKEY_INTERVAL_MSGS.to_string(), &["README.md", "SUMMARY.md", "docs/crypto.md", "docs/security-posture.md", "docs/testing.md"]),
-        ("kyber rekey interval (secs)", KYBER_REKEY_INTERVAL_SECS.to_string(), &["SUMMARY.md", "docs/crypto.md", "docs/security-posture.md"]),
-        ("shaper base interval (ms)", SHAPER_BASE_INTERVAL_MS.to_string(), &["docs/transports.md", "docs/testing.md"]),
-        ("shaper burst", SHAPER_BURST.to_string(), &["README.md", "docs/transports.md"]),
-        ("clipboard clear (secs)", CLIPBOARD_CLEAR_SECS.to_string(), &["README.md", "docs/cli.md", "docs/memory-hardening.md"]),
-        ("dead-man switch (secs)", DEAD_MAN_SWITCH_SECS.to_string(), &["SUMMARY.md", "docs/cli.md", "docs/memory-hardening.md"]),
-        ("max group members", MAX_GROUP_MEMBERS.to_string(), &["SUMMARY.md", "docs/groups.md"]),
+        (
+            "protocol version",
+            format!("0x{:04x}", PROTOCOL_VERSION),
+            &["README.md", "SUMMARY.md", "docs/wire-protocol.md"],
+        ),
+        (
+            "frame size",
+            FRAME_SIZE.to_string(),
+            &["README.md", "SUMMARY.md", "docs/wire-protocol.md"],
+        ),
+        (
+            "frame header size",
+            FRAME_HEADER_SIZE.to_string(),
+            &["docs/wire-protocol.md"],
+        ),
+        (
+            "max payload size",
+            MAX_PAYLOAD_SIZE.to_string(),
+            &["docs/wire-protocol.md"],
+        ),
+        (
+            "aead tag size",
+            TAG_SIZE.to_string(),
+            &["docs/wire-protocol.md"],
+        ),
+        (
+            "kyber rekey interval (msgs)",
+            KYBER_REKEY_INTERVAL_MSGS.to_string(),
+            &[
+                "README.md",
+                "SUMMARY.md",
+                "docs/crypto.md",
+                "docs/security-posture.md",
+                "docs/testing.md",
+            ],
+        ),
+        (
+            "kyber rekey interval (secs)",
+            KYBER_REKEY_INTERVAL_SECS.to_string(),
+            &["SUMMARY.md", "docs/crypto.md", "docs/security-posture.md"],
+        ),
+        (
+            "shaper base interval (ms)",
+            SHAPER_BASE_INTERVAL_MS.to_string(),
+            &["docs/transports.md", "docs/testing.md"],
+        ),
+        (
+            "shaper burst",
+            SHAPER_BURST.to_string(),
+            &["README.md", "docs/transports.md"],
+        ),
+        (
+            "clipboard clear (secs)",
+            CLIPBOARD_CLEAR_SECS.to_string(),
+            &["README.md", "docs/cli.md", "docs/memory-hardening.md"],
+        ),
+        (
+            "dead-man switch (secs)",
+            DEAD_MAN_SWITCH_SECS.to_string(),
+            &["SUMMARY.md", "docs/cli.md", "docs/memory-hardening.md"],
+        ),
+        (
+            "max group members",
+            MAX_GROUP_MEMBERS.to_string(),
+            &["SUMMARY.md", "docs/groups.md"],
+        ),
     ];
 
     let mut failures: Vec<String> = Vec::new();
     for (label, needle, files) in constants {
         for file in *files {
-            let body =
-                std::fs::read_to_string(file).with_context(|| format!("read {file}"))?;
+            let body = std::fs::read_to_string(file).with_context(|| format!("read {file}"))?;
             if !body.contains(needle.as_str()) {
                 failures.push(format!(
                     "{label} (`{needle}`) not found in {file} — update the doc, not the code"
@@ -473,6 +536,100 @@ fn doccheck() -> Result<()> {
         println!("DOC-CHECK-OK constants={} tests={tests}", constants.len());
         Ok(())
     } else {
-        anyhow::bail!("DOC-LINT FAILED ({})\n  {}", failures.len(), failures.join("\n  "))
+        anyhow::bail!(
+            "DOC-LINT FAILED ({})\n  {}",
+            failures.len(),
+            failures.join("\n  ")
+        )
     }
+}
+
+// ---------------------------------------------------------------------------
+// Prover env verification (Track C): `cargo xtask prover [--check] [DIR]`.
+// Verifies the pinned, sha256-manifested Tamarin/Maude install used for
+// formal verification. With `--check` (release ceremony) a broken or
+// absent prover fails the run; without it the command reports status.
+// ---------------------------------------------------------------------------
+
+fn prover_check() -> Result<()> {
+    let args: Vec<String> = std::env::args().skip(2).collect();
+    let strict = args.iter().any(|a| a == "--check");
+    let dir = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .cloned()
+        .unwrap_or_default();
+
+    // Candidate install roots, in order: CLI arg, env, known paths.
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if !dir.is_empty() {
+        candidates.push(PathBuf::from(&dir));
+    }
+    if let Ok(env_dir) = std::env::var("NULL_PROVER_DIR") {
+        if !env_dir.is_empty() {
+            candidates.push(PathBuf::from(env_dir));
+        }
+    }
+    candidates.push(PathBuf::from("/tmp/prover"));
+    candidates.push(PathBuf::from("prover-env"));
+
+    let root = candidates
+        .into_iter()
+        .find(|c| c.join("pins.sha256").exists());
+    let Some(root) = root else {
+        let msg = "no pinned prover install found (looked for pins.sha256 in the usual roots). \
+                   Install with: ./model/prover-install.sh [DIR]";
+        if strict {
+            anyhow::bail!("PROVER-CHECK FAILED: {msg}");
+        }
+        println!("PROVER-STATUS: absent — {msg}");
+        return Ok(());
+    };
+
+    // 1. Checksum the installed tree against the pins manifest.
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("sha256sum -c pins.sha256")
+        .current_dir(&root)
+        .status()
+        .context("sha256sum check")?;
+    if !status.success() {
+        anyhow::bail!("PROVER-CHECK FAILED: sha256 mismatch in {}", root.display());
+    }
+
+    // 2. Both binaries actually run (Maude must be on PATH + MAUDE_LIB for
+    // tamarin-prover, exactly as the pinned env.sh sets).
+    let sh = |bin: &str| -> Result<bool> {
+        let full = root.join(bin);
+        if !full.exists() {
+            return Ok(false);
+        }
+        let maude_dir = root.join("maude-dist");
+        let path = std::env::var("PATH").unwrap_or_default();
+        let env_path = format!("{}:{path}", maude_dir.display());
+        let ok = std::process::Command::new(&full)
+            .arg("--version")
+            .env("PATH", &env_path)
+            .env("MAUDE_LIB", &maude_dir)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        Ok(ok)
+    };
+    let maude_ok = sh("maude-dist/maude")?;
+    let tamarin_ok = sh("tamarin-prover")?;
+    if !maude_ok || !tamarin_ok {
+        anyhow::bail!(
+            "PROVER-CHECK FAILED: binaries in {} did not execute (maude={maude_ok}, tamarin={tamarin_ok})",
+            root.display()
+        );
+    }
+
+    println!(
+        "PROVER-CHECK-OK dir={} (maude + tamarin-prover, sha256-pinned)",
+        root.display()
+    );
+    Ok(())
 }
