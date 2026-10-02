@@ -14,6 +14,10 @@ doesn't explain.
 | Line chat | `--peer <null://…>` (no `--tui`) | `chat_loop`: shaped sends, `Inbox` recovery, `[peer]` echo lines |
 | TUI chat | any session + `--tui` | `chat_loop_tui` / `tui_loopback`: full-screen Ratatui |
 | Responder | `--listen <PORT>` | Binds `127.0.0.1:<PORT>`, prints its `null://` string, serves **one** inbound handshake, then chats |
+| Group / update stubs | `null group …` / `null update …` | Parse and dispatch; bodies land in later milestones — today they fail loudly (`Group messaging CLI lands in Task 5`, `update CLI lands in Task 7`) |
+
+With no subcommand the chat path runs exactly as before: all flags keep
+their meaning, and the `contrib/` systemd units are untouched.
 
 Idle mode is a real milestone boundary: transport + lifecycle are live
 (wipe-on-signal, probes) but no session runs; the README says so and this

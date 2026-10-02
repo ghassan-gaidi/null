@@ -56,6 +56,69 @@ struct Args {
     /// `check` (also probe for TPM/YubiKey isolates).
     #[arg(long, default_value = "software")]
     hsm: String,
+    /// Subcommand (group / update). Absent = chat path: every flag above
+    /// keeps working exactly as before.
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+/// Group messaging + release-update surfaces. Inner grammars are fully
+/// named here so `--help` is stable; dispatch bodies land in Tasks 5/7.
+#[derive(clap::Subcommand, Debug)]
+enum Cmd {
+    /// Group messaging (Null-MLS TreeKEM).
+    Group(GroupArgs),
+    /// Release update check/apply.
+    Update(UpdateArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct GroupArgs {
+    #[command(subcommand)]
+    cmd: GroupCmd,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum GroupCmd {
+    Create,
+    Join,
+    Info,
+    Roster,
+    Add,
+    Remove,
+    Update,
+    Send,
+    Recv,
+}
+
+#[derive(clap::Args, Debug)]
+struct UpdateArgs {
+    #[command(subcommand)]
+    cmd: UpdateCmd,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum UpdateCmd {
+    Check,
+    Apply,
+}
+
+/// Subcommand dispatch. Stubs fail loudly until Tasks 5/7 wire them.
+async fn dispatch_cmd(cmd: Cmd) -> Result<()> {
+    match cmd {
+        Cmd::Group(g) => dispatch_group(g.cmd).await,
+        Cmd::Update(u) => dispatch_update(u.cmd).await,
+    }
+}
+
+async fn dispatch_group(cmd: GroupCmd) -> Result<()> {
+    let _ = cmd;
+    anyhow::bail!("group messaging CLI lands in Task 5 (library + tests only today)")
+}
+
+async fn dispatch_update(cmd: UpdateCmd) -> Result<()> {
+    let _ = cmd;
+    anyhow::bail!("update CLI lands in Task 7 (library + tests only today)")
 }
 
 #[tokio::main]
@@ -67,6 +130,11 @@ async fn main() -> Result<()> {
         eprintln!("[null] WARN: --secure-input needs root; falling back to /dev/tty");
     }
     check_tui_secure_input(args.tui, args.secure_input)?;
+
+    // Subcommands bypass the chat bootstrap (no transports needed yet).
+    if let Some(cmd) = args.cmd {
+        return dispatch_cmd(cmd).await;
+    }
 
     // Bootstrap: transports.
     let transports: Vec<null_core::TransportKind> = args
@@ -1280,6 +1348,20 @@ mod tests {
         let raw = conn_b.recv_blob().await.unwrap();
         let out = inbox_b.receive_batch(&raw, &ad).unwrap();
         assert!(out.goodbye, "peer must observe an orderly goodbye");
+    }
+
+    /// New `group` / `update` subcommands parse, and every existing flat
+    /// invocation still parses with no subcommand (backward compat).
+    #[test]
+    fn subcommands_parse_and_flags_stay_compatible() {
+        let a = Args::try_parse_from(["null", "group", "info"]).unwrap();
+        assert!(a.cmd.is_some(), "group subcommand must parse");
+        let u = Args::try_parse_from(["null", "update", "check"]).unwrap();
+        assert!(u.cmd.is_some(), "update subcommand must parse");
+        let b = Args::try_parse_from(["null", "--peer", "loopback", "--tui"]).unwrap();
+        assert!(b.cmd.is_none(), "flat flags must mean chat path");
+        assert_eq!(b.peer.as_deref(), Some("loopback"));
+        assert!(b.tui);
     }
 
     /// `--secure-input` is line-mode only: the TUI reads keys through the
