@@ -81,7 +81,7 @@ When `--verified`:
 | `/unlock` | Unlocks; **duress PIN `0000` triggers the panic wipe** instead |
 | `/copy` | Copies the last peer message; clipboard auto-clears after 5 s in a background thread (Wayland `wl-copy` zombies reaped) |
 | Ctrl-C | Panic wipe + exit 0 |
-| Esc (TUI) | Quit (goodbye/drain in live TUI; wipes) |
+| Esc (TUI) | Quit — restores terminal and wipes; no goodbye frame is sent (known gap, see §10) |
 
 Auto-lock: after `--auto-lock-secs` (default `1800` s) idle, the session
 locks and demands the PIN. Dead-man: `--dead-man-secs` defaults to `0`

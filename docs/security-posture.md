@@ -90,6 +90,10 @@ proof.
 
 - TUI quit path (`Esc`) wipes but does not send a goodbye frame (line-mode
   quit does); a TUI peer may see a disconnect rather than a goodbye.
+- TUI ignores `--secure-input`: the evdev key reader is wired only into the
+  line-mode loop, so `--tui --secure-input` silently falls back to terminal
+  input with only a table-cell warning. Passing both flags currently buys
+  nothing.
 - Deniable `finalize` falls back to the advertised `k=` when the response
   ek is empty (weaker than verified mode's hard fail).
 - Receive-side rekeys: a mostly-silent peer still fires a rekey on its own

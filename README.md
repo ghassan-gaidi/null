@@ -25,14 +25,14 @@ live two-process chats (deniable, verified, TUI) proven over real sockets.
 | Out-of-order tolerant decryption (skipped-key cache) | ✅ | ✅-ish |
 | Deniable by default, opt-in ML-DSA-65 verified mode | ✅ | ❌ |
 | In-RAM key-transparency log, fail-closed on key change | ✅ | Rare |
-| Multi-device: bound transcripts, fan-out, device revocation | ✅ | ✅-ish |
+| Multi-device: bound transcripts, fan-out, device revocation | library + tests, no CLI surface yet | ✅-ish |
 | Downgrade-attack matrix enforced by test (10 cases) | ✅ | Rare |
 | Multi-transport: Tor / I2P / Nym / Snowflake / WebTunnel / obfs4 | ✅ | ❌ |
 | Fixed 2048-byte frames + token-bucket shaping + dummy cover | ✅ | ❌ |
 | RAM-only, mlock, 3-pass panic wipe, no disk writes | ✅ | ❌ |
 | Duress PIN, decoy mode, USBGuard, auto-lock, clipboard auto-clear | ✅ | ❌ |
-| Group messaging with PCS-preserving commits | ✅ | ✅-ish |
-| Signed, gossip-distributed, downgrade-proof updates | ✅ | ❌ |
+| Group messaging with PCS-preserving commits | library + tests, no CLI surface yet | ✅-ish |
+| Signed, gossip-distributed, downgrade-proof updates | library + tests, no CLI surface yet | ❌ |
 | Reproducible builds (verified in CI-able `xtask`) | ✅ | Rare |
 
 ---

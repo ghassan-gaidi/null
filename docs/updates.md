@@ -1,5 +1,8 @@
 # Updates & supply chain
 
+> Status: library + tests only — no `null` CLI surface yet. Manifests are
+> built and verified in tests and `xtask`, not by any shipped binary.
+
 How release updates are signed, verified, distributed, and defended
 against downgrade. Implementation: `crates/null-update` (312 lines).
 

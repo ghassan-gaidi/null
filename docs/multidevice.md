@@ -1,5 +1,9 @@
 # Multi-device design
 
+> Status: library + tests only — no `null` CLI surface yet. `fanout_pack`
+> and `DeviceSet` are exercised by `crates/null-session/tests/multidevice.rs`,
+> not by any shipped binary.
+
 One identity (ML-DSA-65 key), N device sub-keys (Kyber + X25519 each).
 
 ## Model
