@@ -41,7 +41,12 @@ handshake models if `model/**` changed in the release window.
 SOURCE_DATE_EPOCH=0  TZ=UTC  LC_ALL=C  cargo build --locked --bin null
 ```
 
-and compares SHA256. For a *release* artifact, go further:
+and compares SHA256 — then verifies the pinned prover tree against
+`pins.sha256` (same check as `prover --check`). With no pinned install
+present it says so loudly (`REPRO-PROVER: absent`) and the Rust
+comparison still stands; a *release-grade* repro needs the prover
+(`./model/prover-install.sh`), full stop. For a *release* artifact, go
+further:
 
 - Build in a **clean container** with the pinned toolchain
   (`rust-version = 1.75` minimum; record the exact stable version).
@@ -66,23 +71,42 @@ Never ship a manifest whose `cargo_lock_digest_hex` doesn't match the
 closure you actually built against. This is the supply-chain audit trail:
 `version` says *when*, the lockfile digest says *what dependencies*.
 
-## 4. Artifact attestation (targets)
+## 4. Artifact attestation (SBOM shipped, cosign manual)
 
-The **shipped** story is: reproducible build + hybrid-signed manifest.
-Release-process targets still on the roadmap (`docs/security-posture.md`):
+The **shipped** story is: reproducible build (+ prover pins) and
+hybrid-signed manifest.
 
-- **SBOM** — emit the dependency closure (a `cargo metadata` dump or
-  syft) alongside the artifact.
-- **sigstore/cosign attestation** — a transparency-recorded signature on
-  the release artifact itself, linking the OCI-style digest to a keyless
-  identity, publishing the double-build hashes for independent
-  verification.
+- **SBOM** — `cargo run -p xtask -- sbom` emits the locked dependency
+  closure as JSON on stdout (name, version, source, license per
+  package, sorted; unknown licenses stay null). Redirect to a file for
+  the release artifact (`sbom-<commit>.json`). Offline, no new deps —
+  it reads the committed lockfile via `cargo metadata --locked`.
+- **sigstore/cosign attestation** — operator-run at release time (needs
+  `cosign` + network; keyless OIDC). Attest the exact triple repro
+  printed, plus the SBOM and manifest:
+
+```bash
+BIN_SHA=$(sha256sum null-binary | cut -d' ' -f1)
+cosign sign-blob --yes \
+  --output-signature "null-${BIN_SHA}.sig" \
+  --output-certificate "null-${BIN_SHA}.pem" \
+  null-binary
+cosign attest --yes \
+  --predicate sbom-<commit>.json --type cyclonedx \
+  --output-file "sbom-<commit>.att" \
+  null-binary
+```
+
+  Publish the `.sig`/`.pem`/`.att` next to the artifact so verifiers get
+  transparency-logged provenance *in addition to* the hybrid manifest
+  signatures (which remain the mandatory client check).
 - **Onion distribution channel** — a static `.onion` host serving
   manifest + binary, so even the *transport* of updates is anonymous
   (`docs/updates.md` §6).
 
-These do not change the verification model (clients still require hybrid
-signatures); they raise the *auditability* of the release process.
+Attestation does not change the verification model (clients still
+require hybrid signatures); it raises the *auditability* of the release
+process.
 
 ## 5. Versioning and tagging
 

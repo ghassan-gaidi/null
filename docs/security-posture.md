@@ -10,7 +10,7 @@ by a gate or explicitly a limitation.
 Null is a **design-confident, formally verified at the establishment
 layer** messenger: the handshake is machine-proven (5/5 Tamarin lemmas,
 CI-enforced); the ratchet phase is modelled but not yet machine-proven
-(113 tests + KATs + fuzz in the meantime); the transport/endpoint story is
+(114 tests + KATs + fuzz in the meantime); the transport/endpoint story is
 engineered and tested but has *not* been hardened by a third-party audit,
 side-channel measurement (`dudect`), sanitizer fuzzing, or unbounded
 adversarial review. Use of `--verified` + out-of-band `i=` pinning is the
@@ -84,7 +84,7 @@ proof.
 | HSM | Tier-1 software binding; Tier-2 probe | **native TPM/YubiKey/SE key ops not linked** — do not treat the probe as a key-isolation boundary |
 | Transport | Tor/I2P/Nym dialing, PT bridge templates, shaping, dummies | metadata rides the transport's own anonymity; bridge sidecars are operator-run |
 | Updates | hybrid Ed25519+SLH-DSA, monotonic floor, `check` (zero writes) + explicit `apply` (temp→rename; binary is the one deliberate disk artifact, secrets stay RAM-only) | onion fetch channel is roadmap; release-key compromise is catastrophic by design |
-| Supply chain | lockfile, `--locked`, repro, `cargo-audit` + `cargo-deny` gates in `supply-chain.yml` (license allow-list, sources, advisories, duplicate/bans) | sigstore/SBOM are release-process targets, not shipped; SBOM contents self-certify one level of the toolchain |
+| Supply chain | lockfile, `--locked`, repro (+ prover pins), `xtask sbom`, `cargo-audit` + `cargo-deny` gates in `supply-chain.yml` (license allow-list, sources, advisories, duplicate/bans) | cosign attestation is a documented manual release step; SBOM contents self-certify one level of the toolchain |
 
 ## 6. Known bugs / edge cases (behave as designed, but be aware)
 

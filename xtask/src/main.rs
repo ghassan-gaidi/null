@@ -24,8 +24,9 @@ fn main() -> Result<()> {
         }
         "doccheck" => doccheck(),
         "prover" => prover_check(),
+        "sbom" => sbom(),
         _ => {
-            println!("usage: cargo xtask <repro|fuzz [iters] [seed]|kat [--check]|doccheck|prover [--check] [DIR]>");
+            println!("usage: cargo xtask <repro|fuzz [iters] [seed]|kat [--check]|doccheck|prover [--check] [DIR]|sbom>");
             Ok(())
         }
     }
@@ -59,9 +60,25 @@ fn repro() -> Result<()> {
     println!("build1: {}", hashes[1]);
     if hashes[0] == hashes[1] {
         println!("REPRODUCIBLE: hashes match");
-        Ok(())
     } else {
         anyhow::bail!("NON-REPRODUCIBLE: hashes differ (inspect toolchain/paths)")
+    }
+    // Prover pins ride along: a release-grade repro covers the pinned
+    // Tamarin/Maude tree too (Track C follow-up). Absent install is a
+    // loud skip, not a silent pass — the release ceremony needs it.
+    match find_prover_root("") {
+        Some(root) => {
+            check_prover_pins(&root)?;
+            println!("REPRO-PROVER-OK dir={}", root.display());
+            Ok(())
+        }
+        None => {
+            println!(
+                "REPRO-PROVER: absent — pinned prover not found; Rust comparison stands, \
+                 release verification needs ./model/prover-install.sh [DIR]"
+            );
+            Ok(())
+        }
     }
 }
 
@@ -557,6 +574,38 @@ fn doccheck() -> Result<()> {
 // absent prover fails the run; without it the command reports status.
 // ---------------------------------------------------------------------------
 
+/// First candidate root (CLI arg, env, known paths) holding pins.sha256.
+fn find_prover_root(arg_dir: &str) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if !arg_dir.is_empty() {
+        candidates.push(PathBuf::from(arg_dir));
+    }
+    if let Ok(env_dir) = std::env::var("NULL_PROVER_DIR") {
+        if !env_dir.is_empty() {
+            candidates.push(PathBuf::from(env_dir));
+        }
+    }
+    candidates.push(PathBuf::from("/tmp/prover"));
+    candidates.push(PathBuf::from("prover-env"));
+    candidates
+        .into_iter()
+        .find(|c| c.join("pins.sha256").exists())
+}
+
+/// Verify the installed prover tree against its sha256 pins manifest.
+fn check_prover_pins(root: &std::path::Path) -> Result<()> {
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("sha256sum -c pins.sha256")
+        .current_dir(root)
+        .status()
+        .context("sha256sum check")?;
+    if !status.success() {
+        anyhow::bail!("PROVER-CHECK FAILED: sha256 mismatch in {}", root.display());
+    }
+    Ok(())
+}
+
 fn prover_check() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(2).collect();
     let strict = args.iter().any(|a| a == "--check");
@@ -567,21 +616,7 @@ fn prover_check() -> Result<()> {
         .unwrap_or_default();
 
     // Candidate install roots, in order: CLI arg, env, known paths.
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if !dir.is_empty() {
-        candidates.push(PathBuf::from(&dir));
-    }
-    if let Ok(env_dir) = std::env::var("NULL_PROVER_DIR") {
-        if !env_dir.is_empty() {
-            candidates.push(PathBuf::from(env_dir));
-        }
-    }
-    candidates.push(PathBuf::from("/tmp/prover"));
-    candidates.push(PathBuf::from("prover-env"));
-
-    let root = candidates
-        .into_iter()
-        .find(|c| c.join("pins.sha256").exists());
+    let root = find_prover_root(&dir);
     let Some(root) = root else {
         let msg = "no pinned prover install found (looked for pins.sha256 in the usual roots). \
                    Install with: ./model/prover-install.sh [DIR]";
@@ -593,15 +628,7 @@ fn prover_check() -> Result<()> {
     };
 
     // 1. Checksum the installed tree against the pins manifest.
-    let status = std::process::Command::new("sh")
-        .arg("-c")
-        .arg("sha256sum -c pins.sha256")
-        .current_dir(&root)
-        .status()
-        .context("sha256sum check")?;
-    if !status.success() {
-        anyhow::bail!("PROVER-CHECK FAILED: sha256 mismatch in {}", root.display());
-    }
+    check_prover_pins(&root)?;
 
     // 2. Both binaries actually run (Maude must be on PATH + MAUDE_LIB for
     // tamarin-prover, exactly as the pinned env.sh sets).
@@ -638,4 +665,93 @@ fn prover_check() -> Result<()> {
         root.display()
     );
     Ok(())
+}
+
+/// Trimmed dependency-closure entries from `cargo metadata` JSON, sorted
+/// by (name, version) for deterministic output. Unknown licenses stay
+/// null — unknown is unknown, not MIT.
+fn sbom_entries(meta: &serde_json::Value) -> Result<Vec<serde_json::Value>> {
+    let pkgs = meta
+        .get("packages")
+        .and_then(|p| p.as_array())
+        .ok_or_else(|| anyhow::anyhow!("metadata has no packages array"))?;
+    let mut out: Vec<serde_json::Value> = pkgs
+        .iter()
+        .map(|p| {
+            serde_json::json!({
+                "name": p.get("name"),
+                "version": p.get("version"),
+                "source": p.get("source"),
+                "license": p.get("license"),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| {
+        let key = |v: &serde_json::Value| {
+            (
+                v.get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                v.get("version")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            )
+        };
+        key(a).cmp(&key(b))
+    });
+    Ok(out)
+}
+
+/// Emit the locked dependency closure as JSON on stdout (redirect to a
+/// file for the release artifact). Offline, no new deps: `cargo metadata`
+/// over the committed lockfile.
+fn sbom() -> Result<()> {
+    let meta_out = std::process::Command::new("cargo")
+        .args(["metadata", "--locked", "--format-version", "1"])
+        .output()
+        .context("cargo metadata")?;
+    if !meta_out.status.success() {
+        anyhow::bail!("cargo metadata failed");
+    }
+    let meta: serde_json::Value =
+        serde_json::from_slice(&meta_out.stdout).context("parse metadata")?;
+    let commit = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .unwrap_or_default();
+    let doc = serde_json::json!({
+        "generated_by": "cargo xtask sbom",
+        "commit": commit.trim(),
+        "packages": sbom_entries(&meta)?,
+    });
+    println!("{}", serde_json::to_string_pretty(&doc)?);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SBOM entries derive from cargo-metadata packages: sorted, license
+    /// preserved (null stays null — unknown is unknown, not MIT).
+    #[test]
+    fn sbom_entries_sorted_and_complete() {
+        let meta: serde_json::Value = serde_json::from_str(
+            r#"{"packages":[
+                {"name":"zeta","version":"2.0","source":"registry+https://x","license":null},
+                {"name":"alpha","version":"1.0","source":"registry+https://x","license":"MIT"}
+            ]}"#,
+        )
+        .unwrap();
+        let entries = sbom_entries(&meta).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "alpha");
+        assert_eq!(entries[0]["license"], "MIT");
+        assert_eq!(entries[1]["name"], "zeta");
+        assert!(entries[1]["license"].is_null());
+    }
 }
