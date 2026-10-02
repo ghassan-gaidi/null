@@ -15,7 +15,13 @@
 set -euo pipefail
 
 DEST="${1:-prover-env}"
-DEST="$(cd "$(dirname "$0")/.." && pwd)/$DEST"
+# Absolute destinations are honored as-is; relative ones resolve
+# against the repo root (an absolute arg used to install INSIDE the
+# repo under tmp/ — fixed after it bit a real run).
+case "$DEST" in
+  /*) ;;
+  *) DEST="$(cd "$(dirname "$0")/.." && pwd)/$DEST" ;;
+esac
 
 MAUDE_URL="https://github.com/maude-lang/Maude/releases/download/Maude3.5.1/Maude-3.5.1-linux-x86_64.zip"
 MAUDE_SHA="72ed1ca87e3b3d0dfc6ee1436baf154bf04c45ff97d521bec040c5e8dfc8f92c"
@@ -43,11 +49,12 @@ if [ ! -x tamarin-prover ]; then
   rm -f tamarin.tar.gz
 fi
 
-# Persist the pins for `cargo xtask prover --check`.
-cat > pins.sha256 <<EOF
-$MAUDE_SHA  maude-dist/maude
-$TAMARIN_SHA  tamarin-prover
-EOF
+# Persist the pins for `cargo xtask prover --check`: hash the EXTRACTED
+# artifacts (every file under maude-dist + the tamarin binary), not the
+# download archives — the archives are deleted above, and their hashes
+# say nothing about what actually runs. (An earlier revision pinned the
+# archive hashes against binary paths, so --check could never pass.)
+find maude-dist tamarin-prover -type f | LC_ALL=C sort | xargs sha256sum > pins.sha256
 
 cat > env.sh <<EOF
 export PATH="$DEST/maude-dist:\$PATH"
