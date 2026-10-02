@@ -140,6 +140,10 @@ enum GroupCmd {
     Send {
         #[arg(long)]
         state: Option<String>,
+        /// Sender member id (64 hex); must be a roster member.
+        #[arg(long)]
+        sender: String,
+        /// Message text (absent = read stdin; then --state is required).
         #[arg(long)]
         message: Option<String>,
     },
@@ -147,6 +151,7 @@ enum GroupCmd {
     Recv {
         #[arg(long)]
         state: Option<String>,
+        /// Package blob (absent = read stdin).
         #[arg(long)]
         package: Option<String>,
     },

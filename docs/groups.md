@@ -1,8 +1,8 @@
 # Groups — Null-MLS (TreeKEM)
 
-> Status: membership CLI live (`null group create|keygen|join|info|roster|
-> add|remove|update|sync`, pipe-oriented, RAM-only); message `send|recv`
-> packaging follows. Core protocol exercised by tests + `xtask`.
+> Status: CLI live — membership (`create|keygen|join|info|roster|add|
+> remove|update|sync`) and messaging (`send|recv`), pipe-oriented and
+> RAM-only. Core protocol exercised by tests + `xtask`.
 
 Group messaging uses a real ratchet tree with post-quantum node keys:
 **MLS-shaped, not RFC 9420-conformant** — no interop claim is made. The
@@ -90,6 +90,29 @@ message_key = HKDF(tree_secret, salt = group_id,
 
 Recipients prune their per-sender chains when a committer refreshes paths,
 so committers and receivers stay sequence-aligned across commits.
+
+## Message packaging (`pack_message` / `unpack_message`)
+
+`null group send|recv` move bytes with the §5 keys — no new key agreement,
+just a documented package around the documented KDF:
+
+```
+package = sender_id(32) ‖ epoch(8 BE) ‖ seq(8 BE) ‖ ct
+ct      = ChaCha20-Poly1305(key, nonce=0, ad, plaintext)
+ad      = group_id ‖ sender_id ‖ epoch ‖ seq
+key     = message_key(sender)  # single-use: zero nonce, same precedent
+                           # as Welcome sealing (§4)
+```
+
+- Plaintext cap 1 MiB (`Group::MSG_MAX_BYTES`); packages must also fit
+  transport blobs.
+- In-order delivery only: `unpack` names gaps (`expected {cur}, got
+  {seq}` — covers loss and replay, since a replayed seq never equals the
+  advanced counter), refuses stale epochs (`sync first`) and unknown
+  senders.
+- A decrypt failure restores the chain counter, so one bad package
+  cannot desync the copy (tested by mutation probe: without the restore
+  the follow-up open fails).
 
 ## 6. Wire-format guards (malicious-commit DoS)
 

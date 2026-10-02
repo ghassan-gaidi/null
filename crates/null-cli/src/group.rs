@@ -162,8 +162,37 @@ pub async fn dispatch(cmd: GroupCmd) -> Result<()> {
             grp(g.process_commit(&b64_decode(&commit)?), "sync")?;
             print_state("STATE", &g);
         }
-        GroupCmd::Send { .. } | GroupCmd::Recv { .. } => {
-            anyhow::bail!("group send/recv lands in Task 5c (message packaging)")
+        GroupCmd::Send {
+            state,
+            sender,
+            message,
+        } => {
+            if message.is_none() && state.is_none() {
+                anyhow::bail!(
+                    "--message and --state cannot both come from stdin; pass one explicitly"
+                );
+            }
+            let mut g = grp(Group::decode_state(&read_blob(&state)?), "state")?;
+            let id = parse_id32(&sender)?;
+            let pt = match message {
+                Some(m) => m.into_bytes(),
+                None => {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    buf.into_bytes()
+                }
+            };
+            let pkg = grp(g.pack_message(&id, &pt), "send")?;
+            println!("PACKAGE:{}", b64_encode(&pkg));
+            print_state("STATE", &g);
+        }
+        GroupCmd::Recv { state, package } => {
+            let mut g = grp(Group::decode_state(&read_blob(&state)?), "state")?;
+            let pkg = read_blob(&package)?;
+            let (from, pt) = grp(g.unpack_message(&pkg), "recv")?;
+            println!("FROM:{}", hex_encode(&from));
+            println!("MESSAGE:{}", b64_encode(&pt));
+            print_state("STATE", &g);
         }
     }
     Ok(())

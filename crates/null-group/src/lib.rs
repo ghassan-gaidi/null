@@ -1051,6 +1051,103 @@ impl Group {
         self.sender_chains.insert(*sender, seq + 1);
         Ok(okm)
     }
+
+    /// Max group-message plaintext: 1 MiB (operator chat; packages must
+    /// also fit transport blobs with room to spare).
+    pub const MSG_MAX_BYTES: usize = 1024 * 1024;
+
+    /// Current chain sequence for a roster member without advancing it
+    /// (`None` = not a member). Lets receivers name gaps precisely.
+    pub fn sender_seq(&self, sender: &[u8; 32]) -> Option<u64> {
+        if !self.members.contains_key(sender) {
+            return None;
+        }
+        Some(self.sender_chains.get(sender).copied().unwrap_or(0))
+    }
+
+    /// Header AD: binds group, sender, epoch and seq so splicing across
+    /// groups, epochs or positions fails decryption.
+    fn message_ad(&self, sender: &[u8; 32], seq: u64) -> Vec<u8> {
+        let mut ad = Vec::with_capacity(80);
+        ad.extend_from_slice(&self.id);
+        ad.extend_from_slice(sender);
+        ad.extend_from_slice(&self.epoch.to_be_bytes());
+        ad.extend_from_slice(&seq.to_be_bytes());
+        ad
+    }
+
+    /// Seal a group message from `sender` (must be a roster member):
+    /// derive the sender's next chain key, AEAD the plaintext under it
+    /// (zero nonce — single-use key, same precedent as Welcome sealing),
+    /// emit `sender ‖ epoch ‖ seq ‖ ct`. Advances the sender chain.
+    pub fn pack_message(&mut self, sender: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>> {
+        self.ensure_live()?;
+        if !self.members.contains_key(sender) {
+            return Err(NullError::Group("unknown sender".into()));
+        }
+        if plaintext.len() > Self::MSG_MAX_BYTES {
+            return Err(NullError::Group("message too large".into()));
+        }
+        let seq = self.sender_chains.get(sender).copied().unwrap_or(0);
+        let mut key = self.message_key(sender)?;
+        let ad = self.message_ad(sender, seq);
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let mut ct = plaintext.to_vec();
+        let res = cipher
+            .encrypt_in_place(Nonce::from_slice(&[0u8; 12]), &ad, &mut ct)
+            .map_err(|e| NullError::Group(format!("seal message: {e}")));
+        use zeroize::Zeroize;
+        key.zeroize();
+        res?;
+        let mut out = Vec::with_capacity(48 + ct.len());
+        out.extend_from_slice(sender);
+        out.extend_from_slice(&self.epoch.to_be_bytes());
+        out.extend_from_slice(&seq.to_be_bytes());
+        out.extend_from_slice(&ct);
+        Ok(out)
+    }
+
+    /// Open a group message: check epoch/seq, derive the same key,
+    /// decrypt. In-order delivery only — gaps, replays, stale epochs and
+    /// unknown senders fail loudly. A decrypt failure restores the chain
+    /// counter so one bad package cannot desync the copy.
+    pub fn unpack_message(&mut self, bytes: &[u8]) -> Result<([u8; 32], Vec<u8>)> {
+        self.ensure_live()?;
+        if bytes.len() < 48 + 16 || bytes.len() > Self::MSG_MAX_BYTES + 48 + 16 {
+            return Err(NullError::Group("bad package length".into()));
+        }
+        let mut sender = [0u8; 32];
+        sender.copy_from_slice(&bytes[..32]);
+        let epoch = u64::from_be_bytes(bytes[32..40].try_into().unwrap());
+        let seq = u64::from_be_bytes(bytes[40..48].try_into().unwrap());
+        if epoch != self.epoch {
+            return Err(NullError::Group("stale epoch: sync first".into()));
+        }
+        let cur = self
+            .sender_seq(&sender)
+            .ok_or_else(|| NullError::Group("unknown sender".into()))?;
+        if seq != cur {
+            return Err(NullError::Group(format!(
+                "sequence gap: expected {cur}, got {seq}"
+            )));
+        }
+        let mut key = self.message_key(&sender)?;
+        let ad = self.message_ad(&sender, seq);
+        let cipher = ChaCha20Poly1305::new(Key::from_slice(&key));
+        let mut pt = bytes[48..].to_vec();
+        let res = cipher
+            .decrypt_in_place(Nonce::from_slice(&[0u8; 12]), &ad, &mut pt)
+            .map_err(|_| NullError::Group("message decrypt failed".into()));
+        use zeroize::Zeroize;
+        key.zeroize();
+        match res {
+            Ok(()) => Ok((sender, pt)),
+            Err(e) => {
+                self.sender_chains.insert(sender, cur);
+                Err(e)
+            }
+        }
+    }
 }
 
 impl Drop for Group {
@@ -1324,8 +1421,7 @@ mod tests {
         );
     }
 
-    /// Joiner state (carries the leaf dk) round-trips and stays live:
-    /// the decoded copy processes the next commit and agrees on keys.
+    /// Joiner state (carries the leaf dk) round-trips and stays live:    /// the decoded copy processes the next commit and agrees on keys.
     #[test]
     fn state_codec_roundtrip_joiner_stays_live() {
         let mut g = Group::create();
@@ -1343,6 +1439,66 @@ mod tests {
         let upd = g.update().unwrap();
         j2.process_commit(&upd).unwrap();
         assert_eq!(j2.info().epoch, g.info().epoch);
+    }
+
+    /// Message packaging: pack/unpack agree across copies; gaps, replays
+    /// and stale epochs fail loudly; success advances exactly one step.
+    #[test]
+    fn group_message_pack_gap_replay_stale() {
+        let mut g = Group::create();
+        let sender = g.roster()[0].0;
+        let (kp_b, dk_b) = real_kp(0x42);
+        let (welcome_bytes, _) = g.add(kp_b).unwrap();
+        let mut j = Group::join(&welcome_bytes, [0x42; 32], &dk_b).unwrap();
+        assert_eq!(j.sender_seq(&sender), Some(0));
+
+        let pkg0 = g.pack_message(&sender, b"hello group").unwrap();
+        let (from, pt) = j.unpack_message(&pkg0).unwrap();
+        assert_eq!(from, sender);
+        assert_eq!(pt, b"hello group");
+        assert_eq!(j.sender_seq(&sender), Some(1));
+
+        // Gap: seq1 against a fresh (seq0) copy fails, no mis-decrypt.
+        // NOTE: j already advanced past seq0; rebuild a pre-recv copy.
+        let pkg1 = g.pack_message(&sender, b"second").unwrap();
+        let mut gap = Group::join(&welcome_bytes, [0x42; 32], &dk_b).unwrap();
+        assert!(gap.unpack_message(&pkg1).is_err());
+
+        // In-order second message opens on the live copy.
+        let (_, pt1) = j.unpack_message(&pkg1).unwrap();
+        assert_eq!(pt1.as_slice(), b"second".as_slice());
+
+        // Replay: pkg0 against the advanced copy fails.
+        assert!(j.unpack_message(&pkg0).is_err());
+
+        // Stale epoch: rotate, pack at the new epoch, old copy refuses;
+        // after ingesting the commit the new package opens (chains
+        // persist across epochs; only the epoch key changes).
+        let upd = g.update().unwrap();
+        let pkg2 = g.pack_message(&sender, b"new epoch").unwrap();
+        assert!(j.unpack_message(&pkg2).is_err());
+        j.process_commit(&upd).unwrap();
+        let (from2, pt2) = j.unpack_message(&pkg2).unwrap();
+        assert_eq!((from2, pt2.as_slice()), (sender, b"new epoch".as_slice()));
+
+        // Tampered ciphertext fails AND leaves the chain untouched: the
+        // next valid package still opens (no silent desync).
+        let pkg3 = g.pack_message(&sender, b"third").unwrap();
+        let mut bad = pkg3.clone();
+        let last = bad.len() - 1;
+        bad[last] ^= 1;
+        assert!(j.unpack_message(&bad).is_err());
+        let (_, pt3) = j.unpack_message(&pkg3).unwrap();
+        assert_eq!(pt3.as_slice(), b"third".as_slice());
+
+        // Unknown sender and oversize plaintext refused at pack time.
+        assert!(g.pack_message(&[9u8; 32], b"x").is_err());
+        assert!(g
+            .pack_message(&sender, &vec![0u8; Group::MSG_MAX_BYTES + 1])
+            .is_err());
+        // Garbage packages refused.
+        assert!(j.unpack_message(b"short").is_err());
+        assert!(j.unpack_message(&vec![0u8; 40]).is_err());
     }
 
     #[test]

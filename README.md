@@ -10,7 +10,7 @@ provides **Level 3 post-quantum messaging security**: ongoing post-quantum
 rekeying inside a continuous triple ratchet, multi-transport censorship
 resistance, and hardware-aware key isolation — all in a terminal-native app.
 
-Everything below is implemented and tested in this repository: 105 tests green,
+Everything below is implemented and tested in this repository: 107 tests green,
 `clippy -D warnings` clean, reproducible builds verified bit-identical, and
 live two-process chats (deniable, verified, TUI) proven over real sockets.
 
@@ -31,7 +31,7 @@ live two-process chats (deniable, verified, TUI) proven over real sockets.
 | Fixed 2048-byte frames + token-bucket shaping + dummy cover | ✅ | ❌ |
 | RAM-only, mlock, 3-pass panic wipe, no disk writes | ✅ | ❌ |
 | Duress PIN, decoy mode, USBGuard, auto-lock, clipboard auto-clear | ✅ | ❌ |
-| Group messaging with PCS-preserving commits | membership CLI live (`create`/`add`/`remove`/`update`/`sync`/`join`/`info`/`roster`); message send/recv follows | ✅-ish |
+| Group messaging with PCS-preserving commits | CLI live: membership (`create`/`add`/`remove`/`update`/`sync`/`join`) + messaging (`send`/`recv`) over pipe-oriented base64 state | ✅-ish |
 | Signed, gossip-distributed, downgrade-proof updates | library + tests, no CLI surface yet | ❌ |
 | Reproducible builds (verified in CI-able `xtask`) | ✅ | Rare |
 
@@ -182,8 +182,8 @@ forks, gaps, and replays are rejected; Welcomes carry roster + public tree
 + joiner path. Up to 50,000 members.
 
 Reachable today: `null group keygen|create|join|info|roster|add|remove|
-update|sync` — pipe-oriented (base64 state on stdio, RAM-only; see
-`docs/groups.md` §7). Message `send|recv` packaging follows.
+update|sync|send|recv` — pipe-oriented (base64 state on stdio, RAM-only;
+see `docs/groups.md` §7).
 
 ### Updates
 
@@ -257,7 +257,7 @@ Subcommands (chat flags above keep working unchanged when no subcommand
 is given):
 
 ```
-null group create|join|info|roster|add|remove|update|send|recv
+null group create|keygen|join|info|roster|add|remove|update|sync|send|recv
 null update check|apply
 ```
 
@@ -268,7 +268,7 @@ today); `update check|apply` likewise. Stubs fail loudly until wired.
 
 ## Verification
 
-- **105 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
+- **107 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
   healing at message 51, lossless rekey-loss recovery, handshake codecs +
   fragmentation, TCP end-to-end (deniable *and* verified, incl.
   safety-number agreement), TreeKEM commits/openings/blanks, group
