@@ -1,8 +1,10 @@
 # Multi-device design
 
-> Status: library + tests only — no `null` CLI surface yet. `fanout_pack`
-> and `DeviceSet` are exercised by `crates/null-session/tests/multidevice.rs`,
-> not by any shipped binary.
+> Status: roster CLI live (`null devices enroll|revoke|list|active|
+> member-id`, pipe-oriented, RAM-only); group-member-per-device messaging
+> rides the group surface. 1:1 fan-out send (`fanout_pack` over live
+> sessions) needs multi-session chat — a specified follow-up, not this
+> milestone (see §4).
 
 One identity (ML-DSA-65 key), N device sub-keys (Kyber + X25519 each).
 
@@ -27,6 +29,14 @@ The sender keeps one ratchet `Session` per peer device and fans out with
 AD). Receiving is per-session as usual; duplicate delivery across a
 user's own devices is the application's concern (same plaintext, distinct
 sessions — no cross-decryption possible by construction).
+
+CLI status: roster management is live (`null devices …` — enroll,
+revoke, list, active fan-out set, deterministic member ids). Fanning one
+message across N *live* 1:1 sessions from the CLI needs multi-session
+chat (N handshakes, multiplexed receive, per-peer lifecycle) — a
+specified follow-up subsystem, not this milestone. The shipped
+multi-device messaging path is group-member-per-device (§Groups),
+which is fully CLI-operable today.
 
 ## Groups
 

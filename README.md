@@ -10,7 +10,7 @@ provides **Level 3 post-quantum messaging security**: ongoing post-quantum
 rekeying inside a continuous triple ratchet, multi-transport censorship
 resistance, and hardware-aware key isolation — all in a terminal-native app.
 
-Everything below is implemented and tested in this repository: 107 tests green,
+Everything below is implemented and tested in this repository: 110 tests green,
 `clippy -D warnings` clean, reproducible builds verified bit-identical, and
 live two-process chats (deniable, verified, TUI) proven over real sockets.
 
@@ -25,7 +25,7 @@ live two-process chats (deniable, verified, TUI) proven over real sockets.
 | Out-of-order tolerant decryption (skipped-key cache) | ✅ | ✅-ish |
 | Deniable by default, opt-in ML-DSA-65 verified mode | ✅ | ❌ |
 | In-RAM key-transparency log, fail-closed on key change | ✅ | Rare |
-| Multi-device: bound transcripts, fan-out, device revocation | library + tests, no CLI surface yet | ✅-ish |
+| Multi-device: bound transcripts, fan-out, device revocation | roster CLI live (`devices enroll`/`revoke`/`list`/`active`/`member-id`); 1:1 fan-out send needs multi-session chat (follow-up) | ✅-ish |
 | Downgrade-attack matrix enforced by test (10 cases) | ✅ | Rare |
 | Multi-transport: Tor / I2P / Nym / Snowflake / WebTunnel / obfs4 | ✅ | ❌ |
 | Fixed 2048-byte frames + token-bucket shaping + dummy cover | ✅ | ❌ |
@@ -268,7 +268,7 @@ today); `update check|apply` likewise. Stubs fail loudly until wired.
 
 ## Verification
 
-- **107 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
+- **110 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
   healing at message 51, lossless rekey-loss recovery, handshake codecs +
   fragmentation, TCP end-to-end (deniable *and* verified, incl.
   safety-number agreement), TreeKEM commits/openings/blanks, group

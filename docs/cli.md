@@ -15,6 +15,7 @@ doesn't explain.
 | TUI chat | any session + `--tui` | `chat_loop_tui` / `tui_loopback`: full-screen Ratatui |
 | Responder | `--listen <PORT>` | Binds `127.0.0.1:<PORT>`, prints its `null://` string, serves **one** inbound handshake, then chats |
 | Group membership | `null group …` | Pipe-oriented: `keygen` → `create` → `add` → `join` → `update`/`sync` → `remove`; `info`/`roster` inspect; state as base64 on stdio (RAM-only) |
+| Device roster | `null devices …` | `enroll` (fresh needs `--fp`) → `list`/`active` → `revoke`; `member-id` derives deterministic group ids; roster as base64 on stdio (RAM-only, no secrets) |
 | Group messaging | `null group send\|recv` | `send --state S --sender HEX [--message T]` seals (stdin message iff `--state` given); `recv --state S --package P` prints `FROM` + base64 `MESSAGE`; gaps/replays/stale epochs fail loudly |
 | Group / update stubs | `null update …` | Parses and dispatches; body lands in a later milestone — today fails loudly |
 

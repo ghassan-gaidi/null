@@ -1,7 +1,7 @@
 //! Optional identity layer (§4.3): ML-DSA-65 fingerprints, safety
 //! numbers, QR verification. Default mode is deniable (no signatures).
 
-use null_core::{NullError, Result};
+use null_core::{NullError, Result, MAX_GROUP_MEMBERS};
 use sha3::{Digest, Sha3_256};
 use std::collections::HashMap;
 
@@ -177,6 +177,131 @@ impl DeviceSet {
     pub fn active_count(&self) -> usize {
         self.devices.values().filter(|d| !d.revoked).count()
     }
+
+    /// Every enrolled device (active + revoked), sorted by id: the full
+    /// roster for operator listing. Cloned — DeviceInfo fields are plain.
+    pub fn all_devices(&self) -> Vec<([u8; 16], DeviceInfo)> {
+        let mut out: Vec<_> = self
+            .devices
+            .iter()
+            .map(|(id, d)| (*id, d.clone()))
+            .collect();
+        out.sort_unstable_by_key(|(id, _)| *id);
+        out
+    }
+
+    /// State export version (own domain: device rosters, not wire packages).
+    pub const CODEC_VERSION: u8 = 0x01;
+
+    /// Export the roster for operator piping (stdin/stdout — RAM only).
+    /// Carries no secrets (eks are public, flags, counters) but stays
+    /// pipe-only by convention with the rest of the CLI surface.
+    /// Deterministic order (sorted ids) so the same set encodes identically.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = vec![Self::CODEC_VERSION];
+        out.extend_from_slice(&(self.identity_fp.len() as u32).to_be_bytes());
+        out.extend_from_slice(self.identity_fp.as_bytes());
+        out.extend_from_slice(&self.next_epoch.to_be_bytes());
+        let mut ids: Vec<[u8; 16]> = self.devices.keys().copied().collect();
+        ids.sort_unstable();
+        out.extend_from_slice(&(ids.len() as u32).to_be_bytes());
+        for id in &ids {
+            let d = &self.devices[id];
+            out.extend_from_slice(id);
+            out.extend_from_slice(&(d.kyber_ek.len() as u32).to_be_bytes());
+            out.extend_from_slice(&d.kyber_ek);
+            out.push(u8::from(d.revoked));
+            out.extend_from_slice(&d.added_epoch.to_be_bytes());
+        }
+        out
+    }
+
+    /// Decode a roster. Bounds-checked (member cap, per-ek cap, known
+    /// revoked flag); trailing bytes rejected (canonical encoding).
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        if bytes.first() != Some(&Self::CODEC_VERSION) {
+            return Err(NullError::Identity("bad roster version".into()));
+        }
+        let mut rest = &bytes[1..];
+        let (fp_len, r) = get_u32(rest)?;
+        rest = r;
+        if fp_len as usize > 1024 || rest.len() < fp_len as usize {
+            return Err(NullError::Identity("roster fp truncated".into()));
+        }
+        let identity_fp = std::str::from_utf8(&rest[..fp_len as usize])
+            .map_err(|_| NullError::Identity("roster fp not utf8".into()))?
+            .to_string();
+        rest = &rest[fp_len as usize..];
+        let (next_epoch, r) = get_u64(rest)?;
+        rest = r;
+        let (n, r) = get_u32(rest)?;
+        rest = r;
+        if n as usize > MAX_GROUP_MEMBERS {
+            return Err(NullError::Identity("roster too large".into()));
+        }
+        let mut set = Self {
+            identity_fp,
+            devices: HashMap::with_capacity(n as usize),
+            next_epoch,
+        };
+        for _ in 0..n {
+            if rest.len() < 16 {
+                return Err(NullError::Identity("device id truncated".into()));
+            }
+            let mut id = [0u8; 16];
+            id.copy_from_slice(&rest[..16]);
+            rest = &rest[16..];
+            let (ek_len, r) = get_u32(rest)?;
+            rest = r;
+            if ek_len as usize > 4096 || rest.len() < ek_len as usize {
+                return Err(NullError::Identity("device ek truncated".into()));
+            }
+            let kyber_ek = rest[..ek_len as usize].to_vec();
+            rest = &rest[ek_len as usize..];
+            if rest.is_empty() || rest[0] > 1 {
+                return Err(NullError::Identity("bad revoked flag".into()));
+            }
+            let revoked = rest[0] == 1;
+            rest = &rest[1..];
+            let (added_epoch, r) = get_u64(rest)?;
+            rest = r;
+            if kyber_ek.is_empty() || set.devices.contains_key(&id) {
+                return Err(NullError::Identity("bad device entry".into()));
+            }
+            set.devices.insert(
+                id,
+                DeviceInfo {
+                    kyber_ek,
+                    revoked,
+                    added_epoch,
+                },
+            );
+        }
+        if !rest.is_empty() {
+            return Err(NullError::Identity("roster trailing bytes".into()));
+        }
+        Ok(set)
+    }
+}
+
+fn get_u32(bytes: &[u8]) -> Result<(u32, &[u8])> {
+    if bytes.len() < 4 {
+        return Err(NullError::Identity("u32 truncated".into()));
+    }
+    Ok((
+        u32::from_be_bytes(bytes[..4].try_into().unwrap()),
+        &bytes[4..],
+    ))
+}
+
+fn get_u64(bytes: &[u8]) -> Result<(u64, &[u8])> {
+    if bytes.len() < 8 {
+        return Err(NullError::Identity("u64 truncated".into()));
+    }
+    Ok((
+        u64::from_be_bytes(bytes[..8].try_into().unwrap()),
+        &bytes[8..],
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -414,5 +539,33 @@ mod tests {
             set.member_id(&d1),
             "member ids are identity-bound"
         );
+    }
+
+    /// State export round-trips roster, revocation and epoch counter.
+    #[test]
+    fn device_set_codec_roundtrip() {
+        let mut set = DeviceSet::new("ml-dsa:fp");
+        set.add_device([0x11u8; 16], b"ek0".to_vec()).unwrap();
+        set.add_device([0x22u8; 16], b"ek1".to_vec()).unwrap();
+        set.revoke(&[0x11u8; 16]).unwrap();
+        let bytes = set.encode();
+        let back = DeviceSet::decode(&bytes).unwrap();
+        assert_eq!(back.active_count(), 1);
+        assert_eq!(back.device_count(), 2);
+        assert!(back.is_revoked(&[0x11u8; 16]));
+        assert_eq!(back.active_devices()[0].0, [0x22u8; 16]);
+        assert_eq!(back.active_devices()[0].1, b"ek1");
+        // Deterministic order: same set encodes identically.
+        assert_eq!(back.encode(), bytes);
+    }
+
+    #[test]
+    fn device_set_codec_rejects_garbage() {
+        assert!(DeviceSet::decode(b"short").is_err());
+        assert!(DeviceSet::decode(&[0x09]).is_err());
+        // Oversize count refused before allocation.
+        let mut bytes = vec![0x01];
+        bytes.extend_from_slice(&(1u32 << 20).to_be_bytes());
+        assert!(DeviceSet::decode(&bytes).is_err());
     }
 }

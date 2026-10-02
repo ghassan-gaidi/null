@@ -13,31 +13,7 @@ use null_group::{Group, KeyPackage};
 
 use super::GroupCmd;
 
-fn grp<T>(r: null_core::Result<T>, what: &str) -> Result<T> {
-    r.map_err(|e| anyhow::anyhow!("{what}: {e}"))
-}
-
-fn b64_decode(s: &str) -> Result<Vec<u8>> {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD
-        .decode(s.trim())
-        .map_err(|e| anyhow::anyhow!("bad base64: {e}"))
-}
-
-fn b64_encode(b: &[u8]) -> String {
-    use base64::Engine;
-    base64::engine::general_purpose::STANDARD.encode(b)
-}
-
-fn hex_encode(b: &[u8]) -> String {
-    const H: &[u8; 16] = b"0123456789abcdef";
-    let mut s = String::with_capacity(b.len() * 2);
-    for byte in b {
-        s.push(H[(byte >> 4) as usize] as char);
-        s.push(H[(byte & 15) as usize] as char);
-    }
-    s
-}
+use super::blob::{b64_decode, b64_encode, grp, hex_encode, read_blob};
 
 fn parse_id32(s: &str) -> Result<[u8; 32]> {
     let s = s.trim();
@@ -49,19 +25,6 @@ fn parse_id32(s: &str) -> Result<[u8; 32]> {
         id[i] = u8::from_str_radix(std::str::from_utf8(chunk).unwrap(), 16).unwrap();
     }
     Ok(id)
-}
-
-/// Blob input: explicit arg, else stdin (so `... | null group info` works).
-fn read_blob(arg: &Option<String>) -> Result<Vec<u8>> {
-    let s = match arg {
-        Some(v) => v.clone(),
-        None => {
-            let mut buf = String::new();
-            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
-            buf
-        }
-    };
-    b64_decode(&s)
 }
 
 fn print_state(label: &str, g: &Group) {

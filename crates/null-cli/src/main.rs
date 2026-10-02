@@ -1,5 +1,7 @@
 //! `null` binary: bootstrap → discovery → communicate → wipe (§12).
 
+mod blob;
+mod devices;
 mod group;
 mod secure_input;
 
@@ -69,6 +71,8 @@ struct Args {
 enum Cmd {
     /// Group messaging (Null-MLS TreeKEM).
     Group(GroupArgs),
+    /// Device roster (enroll/revoke/list, fan-out set, member ids).
+    Devices(DevicesArgs),
     /// Release update check/apply.
     Update(UpdateArgs),
 }
@@ -163,6 +167,54 @@ struct UpdateArgs {
     cmd: UpdateCmd,
 }
 
+#[derive(clap::Args, Debug)]
+struct DevicesArgs {
+    #[command(subcommand)]
+    cmd: DevicesCmd,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum DevicesCmd {
+    /// Enroll a device (fresh roster needs --fp); prints SET.
+    Enroll {
+        #[arg(long)]
+        set: Option<String>,
+        #[arg(long)]
+        fp: Option<String>,
+        /// Device id, 32 hex chars.
+        #[arg(long)]
+        device: String,
+        /// Device Kyber ek, base64.
+        #[arg(long)]
+        ek: String,
+    },
+    /// Revoke a device; prints advanced SET.
+    Revoke {
+        #[arg(long)]
+        set: Option<String>,
+        #[arg(long)]
+        device: String,
+    },
+    /// List all enrolled devices with flags (state via --state or stdin).
+    List {
+        #[arg(long)]
+        set: Option<String>,
+    },
+    /// Active (non-revoked) fan-out set as `ACTIVE <hex> <b64ek>` lines.
+    Active {
+        #[arg(long)]
+        set: Option<String>,
+    },
+    /// Deterministic group member id for (identity fp, device).
+    #[command(name = "member-id")]
+    MemberId {
+        #[arg(long)]
+        fp: String,
+        #[arg(long)]
+        device: String,
+    },
+}
+
 #[derive(clap::Subcommand, Debug)]
 enum UpdateCmd {
     Check,
@@ -173,6 +225,7 @@ enum UpdateCmd {
 async fn dispatch_cmd(cmd: Cmd) -> Result<()> {
     match cmd {
         Cmd::Group(g) => dispatch_group(g.cmd).await,
+        Cmd::Devices(d) => devices::dispatch(d.cmd).await,
         Cmd::Update(u) => dispatch_update(u.cmd).await,
     }
 }
