@@ -12,14 +12,14 @@ failure mode.
 | Frames | 2048B codec, padding, version/type rejection, shaper, blob batching | `null-frame` (7 tests) |
 | Core types | constants, `FrameType`, `TransportKind`, `ConnectionString` | `null-core` (3 tests) |
 | Identity | safety number, QR, transparency, DeviceSet | `null-identity` (7 tests) |
-| Session | pack/unpack, rekey-at-50, resync, Inbox recovery, goodbye, blob batching | `null-session` (8 in-crate + 5 integration files) |
+| Session | pack/unpack, rekey-at-50, resync, Inbox recovery, goodbye, blob batching | `null-session` (8 in-crate + 6 integration files) |
 | TUI | key routing, lock/unlock, duress, copy-clear | `null-tui` |
 | Group | TreeKEM commits, welcomes, removal, forks | `null-group` |
 | Update | hybrid sigs, downgrade floor, gossip | `null-update` |
 | Transport | multiplexer, obfs4, loopback, blob batching cap | `null-transport` (11 tests) |
 | CLI | two-process chats, pty TUI sessions | `null-cli` |
 
-**111** test attributes workspace-wide (`#[test]` + `#[tokio::test]`,
+**113** test attributes workspace-wide (`#[test]` + `#[tokio::test]`,
 including the `#[test]` inside the `ratchet_interleave.rs` `proptest!`
 block), enforced by `cargo xtask doccheck`: if the docs ever stop
 matching the source count, CI fails. The proptest itself runs 128
@@ -36,6 +36,7 @@ randomized flows per execution.
 | Ratchet roundtrip + out-of-order | encrypt/decrypt interleavings, skipped-key cache (window `MAX_SKIP = 200`) | cargo test |
 | Rekey trigger | `rekey_trigger_at_50` in crypto; session test `rekey_fires_at_50_and_heals_over_frames` — message 51 carries KyberRekey + Data | cargo test |
 | Interleaved ratchet (stateful fuzz) | `ratchet_interleave.rs` proptest: 128 randomized alternating A↔B flows through handshake + frames + rekey boundary, asserting lossless ordered exact-match delivery and counter discipline both ways | cargo test |
+| Lossy / reordered rekey delivery | `rekey_loss.rs` proptest (64 cases): rekey held 0–3 frames while data flows (loss + reorder), asserting lossless ordered recovery + nonzero buffering; fixed test for permanent withholding asserts loud `re-handshake` failure | cargo test |
 | Rekey interval | constants `KYBER_REKEY_INTERVAL_MSGS = 50`, `KYBER_REKEY_INTERVAL_SECS = 604800`; doc-lint pins docs to code | doccheck |
 | Lossless rekey recovery | Inbox: `MissedRekey` buffer (cap `MAX_PENDING = 16`), replay within `RETAINED_REKEYS = 8`, hard fail after `MAX_REKEY_ROUNDS = 3` "re-handshake required" | cargo test |
 | No silent downgrade | `downgrade.rs` 10-case matrix (stripped init/sig/vk, version rollback, handshake-as-data, replay, rekey-as-data, control sanity) | cargo test |
