@@ -16,6 +16,8 @@ null-transport = { workspace = true }
 null-memory = { workspace = true }
 null-identity = { workspace = true }
 null-group = { workspace = true }
+null-update = { workspace = true }
+ed25519-dalek = { version = "2" }
 null-session = { workspace = true }
 null-tui = { workspace = true }
 clap = { version = "4", features = ["derive"] }

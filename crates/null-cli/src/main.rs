@@ -4,6 +4,7 @@ mod blob;
 mod devices;
 mod group;
 mod secure_input;
+mod update;
 
 use anyhow::Result;
 use clap::Parser;
@@ -217,8 +218,38 @@ enum DevicesCmd {
 
 #[derive(clap::Subcommand, Debug)]
 enum UpdateCmd {
-    Check,
-    Apply,
+    /// Verify a manifest+binary pair (zero writes).
+    Check {
+        #[arg(long)]
+        manifest: String,
+        #[arg(long)]
+        binary: String,
+        /// Ed25519 release vk (64 hex); else $NULL_RELEASE_VK.
+        #[arg(long)]
+        release_vk: Option<String>,
+        /// SLH-DSA release vk (64 hex); else $NULL_RELEASE_VK_SLH.
+        #[arg(long)]
+        release_vk_slh: Option<String>,
+        /// Running shipment number; else $NULL_CURRENT_VERSION.
+        #[arg(long)]
+        current_version: Option<String>,
+    },
+    /// Verify then install via temp-file + atomic rename.
+    Apply {
+        #[arg(long)]
+        manifest: String,
+        #[arg(long)]
+        binary: String,
+        #[arg(long)]
+        release_vk: Option<String>,
+        #[arg(long)]
+        release_vk_slh: Option<String>,
+        #[arg(long)]
+        current_version: Option<String>,
+        /// Install path (parent must exist; never implied).
+        #[arg(long)]
+        to: String,
+    },
 }
 
 /// Subcommand dispatch. Stubs fail loudly until Tasks 5/7 wire them.
@@ -235,8 +266,7 @@ async fn dispatch_group(cmd: GroupCmd) -> Result<()> {
 }
 
 async fn dispatch_update(cmd: UpdateCmd) -> Result<()> {
-    let _ = cmd;
-    anyhow::bail!("update CLI lands in Task 7 (library + tests only today)")
+    update::dispatch(cmd).await
 }
 
 #[tokio::main]
@@ -1474,7 +1504,7 @@ mod tests {
     fn subcommands_parse_and_flags_stay_compatible() {
         let a = Args::try_parse_from(["null", "group", "info"]).unwrap();
         assert!(a.cmd.is_some(), "group subcommand must parse");
-        let u = Args::try_parse_from(["null", "update", "check"]).unwrap();
+        let u = Args::try_parse_from(["null", "update", "check", "--manifest", "m", "--binary", "b"]).unwrap();
         assert!(u.cmd.is_some(), "update subcommand must parse");
         let b = Args::try_parse_from(["null", "--peer", "loopback", "--tui"]).unwrap();
         assert!(b.cmd.is_none(), "flat flags must mean chat path");

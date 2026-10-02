@@ -19,7 +19,7 @@ failure mode.
 | Transport | multiplexer, obfs4, loopback, blob batching cap | `null-transport` (11 tests) |
 | CLI | two-process chats, pty TUI sessions | `null-cli` |
 
-**110** test attributes workspace-wide (`#[test]` + `#[tokio::test]`,
+**111** test attributes workspace-wide (`#[test]` + `#[tokio::test]`,
 including the `#[test]` inside the `ratchet_interleave.rs` `proptest!`
 block), enforced by `cargo xtask doccheck`: if the docs ever stop
 matching the source count, CI fails. The proptest itself runs 128

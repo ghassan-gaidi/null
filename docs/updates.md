@@ -1,7 +1,9 @@
 # Updates & supply chain
 
-> Status: library + tests only — no `null` CLI surface yet. Manifests are
-> built and verified in tests and `xtask`, not by any shipped binary.
+> Status: CLI live — `null update check` verifies an operator-fetched
+> manifest+binary pair (zero writes); `null update apply --to PATH`
+> installs the verified binary via temp-file + atomic rename (explicit
+> opt-in). Onion-fetch distribution remains a documented follow-up (§5).
 
 How release updates are signed, verified, distributed, and defended
 against downgrade. Implementation: `crates/null-update` (312 lines).

@@ -54,3 +54,8 @@
 - **Updates**: TOFU on first release key; after that, monotonic + hybrid
   signed. A compromised release key is catastrophic by design — protect
   it accordingly (offline, split).
+- **Update install (posture amendment, recorded not silent)**: secrets
+  stay RAM-only, but the release *binary* is the single deliberate
+  on-disk artifact — `null update apply --to PATH` writes only a fully
+  verified binary (temp-file + atomic rename, explicit opt-in; `check`
+  writes nothing). A seized disk yields the public binary, never keys.

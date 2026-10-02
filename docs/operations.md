@@ -132,6 +132,7 @@ reboot — a deliberate trade for zero on-disk residue.
 | Dead-man/duress wipe fired | Assume anything in RAM is gone (that's the point); wipe disk forensically only if disks ever touched this machine; re-establish all sessions fresh |
 | Sidecar/daemon compromise | Traffic remains E2E-encrypted; the exposure is metadata (timing/volume flattened by shaping) — stop the daemon, replace the binary, verify checksums |
 | Upstream dependency CVE | `cargo audit` gates; pin + bump in `Cargo.lock`, re-run all gates, ship a new signed manifest (downgrade floor protects clients until they get it) |
+| Bad update installed | The downgrade floor forbids re-applying older manifests — rollback is manual: keep a backup of the working binary before `apply` (`cp null null.prev`), restore by copying back. Never bypass verification to "go back faster" |
 
 ## 8. Logging & monitoring posture
 

@@ -10,7 +10,7 @@ provides **Level 3 post-quantum messaging security**: ongoing post-quantum
 rekeying inside a continuous triple ratchet, multi-transport censorship
 resistance, and hardware-aware key isolation — all in a terminal-native app.
 
-Everything below is implemented and tested in this repository: 110 tests green,
+Everything below is implemented and tested in this repository: 111 tests green,
 `clippy -D warnings` clean, reproducible builds verified bit-identical, and
 live two-process chats (deniable, verified, TUI) proven over real sockets.
 
@@ -32,7 +32,7 @@ live two-process chats (deniable, verified, TUI) proven over real sockets.
 | RAM-only, mlock, 3-pass panic wipe, no disk writes | ✅ | ❌ |
 | Duress PIN, decoy mode, USBGuard, auto-lock, clipboard auto-clear | ✅ | ❌ |
 | Group messaging with PCS-preserving commits | CLI live: membership (`create`/`add`/`remove`/`update`/`sync`/`join`) + messaging (`send`/`recv`) over pipe-oriented base64 state | ✅-ish |
-| Signed, gossip-distributed, downgrade-proof updates | library + tests, no CLI surface yet | ❌ |
+| Signed, gossip-distributed, downgrade-proof updates | CLI live: `update check` (zero writes) + explicit `update apply` (temp→rename); onion fetch is a documented follow-up | ❌ |
 | Reproducible builds (verified in CI-able `xtask`) | ✅ | Rare |
 
 ---
@@ -188,9 +188,11 @@ see `docs/groups.md` §7).
 ### Updates
 
 Hybrid-signed manifests (Ed25519 + SLH-DSA-SHA2-128s, both mandatory;
-monotonic version; binary + lockfile hashes; downgrade rejection)
-distributed over onion fetches
-and signature-checked P2P gossip where newest-verified wins.
+monotonic version; binary + lockfile hashes; downgrade rejection).
+`null update check` verifies an operator-fetched pair with zero writes;
+`null update apply --to PATH` installs the verified binary via temp-file
++ atomic rename (explicit opt-in). Onion-fetch distribution is a
+documented follow-up (`docs/updates.md`).
 
 ---
 
@@ -268,7 +270,7 @@ today); `update check|apply` likewise. Stubs fail loudly until wired.
 
 ## Verification
 
-- **110 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
+- **111 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
   healing at message 51, lossless rekey-loss recovery, handshake codecs +
   fragmentation, TCP end-to-end (deniable *and* verified, incl.
   safety-number agreement), TreeKEM commits/openings/blanks, group
