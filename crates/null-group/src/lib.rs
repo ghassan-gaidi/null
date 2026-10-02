@@ -189,6 +189,13 @@ pub(crate) fn get_id(bytes: &[u8]) -> Result<([u8; 32], &[u8])> {
     Ok((id, &bytes[32..]))
 }
 
+/// Wire section cap (commit blanked/updated/bundles, welcome pubs/blanks):
+/// larger counts are rejected BEFORE allocating (docs §6 promises ≤ 1<<20;
+/// honest trees under the 50k cap stay far below it). Without the reject,
+/// a ~100-byte header declaring `u32::MAX` entries drove a ~92MB transient
+/// pre-allocation before failing on truncation.
+const WIRE_SECTION_MAX: u32 = 1 << 20;
+
 fn put_roster(out: &mut Vec<u8>, roster: &[([u8; 32], u32)]) {
     put_u32(out, roster.len() as u32);
     for (id, pos) in roster {
@@ -311,7 +318,10 @@ impl TreeCommit {
         }
         let (n_blank, r) = get_u32(rest)?;
         rest = r;
-        let mut blanked = Vec::with_capacity(n_blank.min(1 << 20) as usize);
+        if n_blank > WIRE_SECTION_MAX {
+            return Err(NullError::Group("blanked too many".into()));
+        }
+        let mut blanked = Vec::with_capacity(n_blank as usize);
         for _ in 0..n_blank {
             let (idx, r) = get_u32(rest)?;
             blanked.push(idx);
@@ -319,7 +329,10 @@ impl TreeCommit {
         }
         let (n_upd, r) = get_u32(rest)?;
         rest = r;
-        let mut updated = Vec::with_capacity(n_upd.min(1 << 20) as usize);
+        if n_upd > WIRE_SECTION_MAX {
+            return Err(NullError::Group("updated too many".into()));
+        }
+        let mut updated = Vec::with_capacity(n_upd as usize);
         for _ in 0..n_upd {
             let (idx, r) = get_u32(rest)?;
             let (ek, r) = get_bytes(r)?;
@@ -328,7 +341,10 @@ impl TreeCommit {
         }
         let (n_bun, r) = get_u32(rest)?;
         rest = r;
-        let mut bundles = Vec::with_capacity(n_bun.min(1 << 20) as usize);
+        if n_bun > WIRE_SECTION_MAX {
+            return Err(NullError::Group("bundles too many".into()));
+        }
+        let mut bundles = Vec::with_capacity(n_bun as usize);
         for _ in 0..n_bun {
             let (target, r) = get_u32(rest)?;
             let (ct, r) = get_bytes(r)?;
@@ -404,7 +420,10 @@ impl WelcomePkg {
         rest = r;
         let (n_pubs, r) = get_u32(rest)?;
         rest = r;
-        let mut pubs = Vec::with_capacity(n_pubs.min(1 << 20) as usize);
+        if n_pubs > WIRE_SECTION_MAX {
+            return Err(NullError::Group("pubs too many".into()));
+        }
+        let mut pubs = Vec::with_capacity(n_pubs as usize);
         for _ in 0..n_pubs {
             let (idx, r) = get_u32(rest)?;
             let (ek, r) = get_bytes(r)?;
@@ -413,7 +432,10 @@ impl WelcomePkg {
         }
         let (n_blank, r) = get_u32(rest)?;
         rest = r;
-        let mut blanks = Vec::with_capacity(n_blank.min(1 << 20) as usize);
+        if n_blank > WIRE_SECTION_MAX {
+            return Err(NullError::Group("blanks too many".into()));
+        }
+        let mut blanks = Vec::with_capacity(n_blank as usize);
         for _ in 0..n_blank {
             let (idx, r) = get_u32(rest)?;
             blanks.push(idx);
@@ -1498,7 +1520,7 @@ mod tests {
             .is_err());
         // Garbage packages refused.
         assert!(j.unpack_message(b"short").is_err());
-        assert!(j.unpack_message(&vec![0u8; 40]).is_err());
+        assert!(j.unpack_message(&[0u8; 40]).is_err());
     }
 
     #[test]
@@ -1552,5 +1574,85 @@ mod tests {
         // The rest of the package is truncated, but the failure must NOT be
         // the depth guard anymore.
         assert!(!format!("{res:?}").contains("absurd tree depth"));
+    }
+
+    /// Oversize section counts must be rejected with a bounds error BEFORE
+    /// allocating: capping `with_capacity` alone still parses, so a
+    /// ~100-byte header declaring `u32::MAX` entries spiked RSS (~92MB for
+    /// a commit: 4 + 32 + 56MB across blanked/updated/bundles) before
+    /// failing on truncation. Docs §6 already promise ≤ 1<<20 sections.
+    #[test]
+    fn commit_with_oversize_section_counts_rejected() {
+        // Well-formed prefix through removes (empty everywhere).
+        fn prefix() -> Vec<u8> {
+            let mut bytes = vec![0x02];
+            bytes.extend_from_slice(&[7u8; 32]); // group id
+            bytes.extend_from_slice(&0u64.to_be_bytes()); // epoch
+            bytes.extend_from_slice(&[9u8; 32]); // prev hash
+            bytes.extend_from_slice(&3u32.to_be_bytes()); // depth
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // roster: empty
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // committer_leaf
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // adds: none
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // removes: none
+            bytes
+        }
+        let huge = (1u32 << 20) + 1;
+        let mut blanked = prefix();
+        blanked.extend_from_slice(&huge.to_be_bytes());
+        let err = TreeCommit::decode(&blanked).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("too many"),
+            "oversize blanked count must fail bounds, got: {err:?}"
+        );
+        let mut updated = prefix();
+        updated.extend_from_slice(&0u32.to_be_bytes()); // blanked: none
+        updated.extend_from_slice(&huge.to_be_bytes());
+        let err = TreeCommit::decode(&updated).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("too many"),
+            "oversize updated count must fail bounds, got: {err:?}"
+        );
+        let mut bundles = prefix();
+        bundles.extend_from_slice(&0u32.to_be_bytes()); // blanked: none
+        bundles.extend_from_slice(&0u32.to_be_bytes()); // updated: none
+        bundles.extend_from_slice(&huge.to_be_bytes());
+        let err = TreeCommit::decode(&bundles).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("too many"),
+            "oversize bundles count must fail bounds, got: {err:?}"
+        );
+    }
+
+    /// Same bound on the Welcome side (pubs/blanks): a tiny blob must
+    /// not drive a 1M-entry pre-allocation before failing.
+    #[test]
+    fn welcome_with_oversize_section_counts_rejected() {
+        // Well-formed prefix through leaf_pos.
+        fn prefix() -> Vec<u8> {
+            let mut bytes = vec![0x02];
+            bytes.extend_from_slice(&[7u8; 32]); // group id
+            bytes.extend_from_slice(&0u64.to_be_bytes()); // epoch
+            bytes.extend_from_slice(&[9u8; 32]); // prev hash
+            bytes.extend_from_slice(&3u32.to_be_bytes()); // depth
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // roster: empty
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // leaf_pos
+            bytes
+        }
+        let huge = (1u32 << 20) + 1;
+        let mut pubs = prefix();
+        pubs.extend_from_slice(&huge.to_be_bytes());
+        let err = WelcomePkg::decode(&pubs).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("too many"),
+            "oversize pubs count must fail bounds, got: {err:?}"
+        );
+        let mut blanks = prefix();
+        blanks.extend_from_slice(&0u32.to_be_bytes()); // pubs: none
+        blanks.extend_from_slice(&huge.to_be_bytes());
+        let err = WelcomePkg::decode(&blanks).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("too many"),
+            "oversize blanks count must fail bounds, got: {err:?}"
+        );
     }
 }
