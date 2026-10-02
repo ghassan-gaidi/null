@@ -10,7 +10,7 @@ by a gate or explicitly a limitation.
 Null is a **design-confident, formally verified at the establishment
 layer** messenger: the handshake is machine-proven (5/5 Tamarin lemmas,
 CI-enforced); the ratchet phase is modelled but not yet machine-proven
-(98 tests + KATs + fuzz in the meantime); the transport/endpoint story is
+(99 tests + KATs + fuzz in the meantime); the transport/endpoint story is
 engineered and tested but has *not* been hardened by a third-party audit,
 side-channel measurement (`dudect`), sanitizer fuzzing, or unbounded
 adversarial review. Use of `--verified` + out-of-band `i=` pinning is the
@@ -94,8 +94,8 @@ proof.
 - `--tui --secure-input` is rejected at startup: evdev grabbing feeds the
   line-mode reader only, so the combination fails closed instead of
   silently running on terminal input.
-- Deniable `finalize` falls back to the advertised `k=` when the response
-  ek is empty (weaker than verified mode's hard fail).
+- Deniable `finalize` fails closed on an empty responder ek echo (parity
+  with verified mode's hard fail; honest responders always echo).
 - Receive-side rekeys: a mostly-silent peer still fires a rekey on its own
   next send after 50 received messages.
 - The `listener`/`NULL_DIRECT_ADDR` escape hatch is a test hook — real

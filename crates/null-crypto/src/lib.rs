@@ -650,18 +650,22 @@ impl HandshakeInitiator {
     pub fn finalize(self, resp: &HandshakeResponse) -> Result<Session> {
         let dh3 = self.ek_a.diffie_hellman(&resp.ephemeral_pub)?;
         let root = initial_root_key(&dh3, &self.k_kyber);
+        // The responder always echoes its long-term ek (`respond_inner`
+        // sets it unconditionally), so an empty echo means truncation or
+        // tampering on the wire. Fail closed rather than falling back to
+        // the advertised key (parity with `finalize_verified`).
+        if resp.kyber_ek.is_empty() {
+            return Err(NullError::Crypto(
+                "responder ek echo empty: refusing to proceed".into(),
+            ));
+        }
         Ok(Session::new_from_handshake(
             root,
             self.ek_a,
             resp.ephemeral_pub,
             self.k_kyber,
             self.own_kyber,
-            // Prefer the live echo; fall back to the advertised key.
-            if resp.kyber_ek.is_empty() {
-                self.peer_kyber_ek
-            } else {
-                resp.kyber_ek.clone()
-            },
+            resp.kyber_ek.clone(),
         ))
     }
 
@@ -1308,6 +1312,21 @@ mod tests {
         let s2 = peer.diffie_hellman(&ours.public_bytes()).unwrap();
         assert_eq!(s1, s2);
         assert_ne!(s1, [0u8; 32]);
+    }
+
+    #[test]
+    fn deniable_finalize_rejects_stripped_ek_echo() {
+        // An attacker strips the responder's ek echo on the wire.
+        // Deniable finalize must fail closed, not fall back to the
+        // advertised key (parity with verified mode's hard fail).
+        let responder_kp = KyberKeypair::generate();
+        let (initiator, init) = HandshakeInitiator::initiate(&responder_kp.ek_bytes()).unwrap();
+        let (mut resp, _, _) = respond(&init, &responder_kp).unwrap();
+        resp.kyber_ek.clear();
+        assert!(
+            initiator.finalize(&resp).is_err(),
+            "empty ek echo must fail closed"
+        );
     }
 
     #[test]
