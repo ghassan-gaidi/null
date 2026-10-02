@@ -321,6 +321,11 @@ impl TreeCommit {
         if n_blank > WIRE_SECTION_MAX {
             return Err(NullError::Group("blanked too many".into()));
         }
+        // Each entry costs ≥ 4 bytes; a count the remaining input cannot
+        // satisfy is rejected here instead of pre-allocating for it.
+        if n_blank as usize > rest.len() / 4 {
+            return Err(NullError::Group("blanked too many".into()));
+        }
         let mut blanked = Vec::with_capacity(n_blank as usize);
         for _ in 0..n_blank {
             let (idx, r) = get_u32(rest)?;
@@ -330,6 +335,10 @@ impl TreeCommit {
         let (n_upd, r) = get_u32(rest)?;
         rest = r;
         if n_upd > WIRE_SECTION_MAX {
+            return Err(NullError::Group("updated too many".into()));
+        }
+        // Each entry costs ≥ 8 bytes (idx + length prefix, empty payload).
+        if n_upd as usize > rest.len() / 8 {
             return Err(NullError::Group("updated too many".into()));
         }
         let mut updated = Vec::with_capacity(n_upd as usize);
@@ -342,6 +351,10 @@ impl TreeCommit {
         let (n_bun, r) = get_u32(rest)?;
         rest = r;
         if n_bun > WIRE_SECTION_MAX {
+            return Err(NullError::Group("bundles too many".into()));
+        }
+        // Each entry costs ≥ 12 bytes (target + two length prefixes).
+        if n_bun as usize > rest.len() / 12 {
             return Err(NullError::Group("bundles too many".into()));
         }
         let mut bundles = Vec::with_capacity(n_bun as usize);
@@ -423,6 +436,10 @@ impl WelcomePkg {
         if n_pubs > WIRE_SECTION_MAX {
             return Err(NullError::Group("pubs too many".into()));
         }
+        // Each entry costs ≥ 8 bytes (idx + length prefix, empty payload).
+        if n_pubs as usize > rest.len() / 8 {
+            return Err(NullError::Group("pubs too many".into()));
+        }
         let mut pubs = Vec::with_capacity(n_pubs as usize);
         for _ in 0..n_pubs {
             let (idx, r) = get_u32(rest)?;
@@ -433,6 +450,10 @@ impl WelcomePkg {
         let (n_blank, r) = get_u32(rest)?;
         rest = r;
         if n_blank > WIRE_SECTION_MAX {
+            return Err(NullError::Group("blanks too many".into()));
+        }
+        // Each entry costs ≥ 4 bytes.
+        if n_blank as usize > rest.len() / 4 {
             return Err(NullError::Group("blanks too many".into()));
         }
         let mut blanks = Vec::with_capacity(n_blank as usize);
@@ -1692,6 +1713,76 @@ mod tests {
         assert!(
             format!("{err:?}").contains("too many"),
             "oversize blanks count must fail bounds, got: {err:?}"
+        );
+    }
+
+    /// A declared count within the cap but unsatisfiable by the remaining
+    /// input must fail with the bounds error — not allocate for the
+    /// declared entries and then fail on truncation. Covers all five
+    /// section counts (commit blanked/updated/bundles, welcome pubs/blanks).
+    #[test]
+    fn section_counts_bounded_by_remaining_input() {
+        fn commit_prefix() -> Vec<u8> {
+            let mut bytes = vec![0x02];
+            bytes.extend_from_slice(&[7u8; 32]); // group id
+            bytes.extend_from_slice(&0u64.to_be_bytes()); // epoch
+            bytes.extend_from_slice(&[9u8; 32]); // prev hash
+            bytes.extend_from_slice(&3u32.to_be_bytes()); // depth
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // roster: empty
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // committer_leaf
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // adds: none
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // removes: none
+            bytes
+        }
+        fn welcome_prefix() -> Vec<u8> {
+            let mut bytes = vec![0x02];
+            bytes.extend_from_slice(&[7u8; 32]); // group id
+            bytes.extend_from_slice(&0u64.to_be_bytes()); // epoch
+            bytes.extend_from_slice(&[9u8; 32]); // prev hash
+            bytes.extend_from_slice(&3u32.to_be_bytes()); // depth
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // roster: empty
+            bytes.extend_from_slice(&0u32.to_be_bytes()); // leaf_pos
+            bytes
+        }
+        // In-cap (1000 < 1<<20) but no body bytes left to satisfy it.
+        let mut blanked = commit_prefix();
+        blanked.extend_from_slice(&1000u32.to_be_bytes());
+        let err = TreeCommit::decode(&blanked).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("too many"),
+            "unsatisfiable blanked count must fail bounds, got: {err:?}"
+        );
+        let mut updated = commit_prefix();
+        updated.extend_from_slice(&0u32.to_be_bytes()); // blanked: none
+        updated.extend_from_slice(&1000u32.to_be_bytes());
+        let err = TreeCommit::decode(&updated).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("too many"),
+            "unsatisfiable updated count must fail bounds, got: {err:?}"
+        );
+        let mut bundles = commit_prefix();
+        bundles.extend_from_slice(&0u32.to_be_bytes()); // blanked: none
+        bundles.extend_from_slice(&0u32.to_be_bytes()); // updated: none
+        bundles.extend_from_slice(&1000u32.to_be_bytes());
+        let err = TreeCommit::decode(&bundles).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("too many"),
+            "unsatisfiable bundles count must fail bounds, got: {err:?}"
+        );
+        let mut pubs = welcome_prefix();
+        pubs.extend_from_slice(&1000u32.to_be_bytes());
+        let err = WelcomePkg::decode(&pubs).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("too many"),
+            "unsatisfiable pubs count must fail bounds, got: {err:?}"
+        );
+        let mut blanks = welcome_prefix();
+        blanks.extend_from_slice(&0u32.to_be_bytes()); // pubs: none
+        blanks.extend_from_slice(&1000u32.to_be_bytes());
+        let err = WelcomePkg::decode(&blanks).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("too many"),
+            "unsatisfiable blanks count must fail bounds, got: {err:?}"
         );
     }
 

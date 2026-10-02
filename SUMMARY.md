@@ -17,7 +17,7 @@ establishment layer.
 
 Proof status, stated plainly, in one paragraph:
 
-- **Engineered & tested**: 122 tests green, `clippy -D warnings` clean,
+- **Engineered & tested**: 123 tests green, `clippy -D warnings` clean,
   committed known-answer vectors, a stable-channel deterministic fuzz
   corpus over every wire decoder, live two-process chats (deniable,
   verified, TUI) proven over real sockets, and bit-identical reproducible
@@ -336,7 +336,7 @@ rest is covered by tests/KATs/fuzz and stated as such.
 | Initiator KCI resistance | Tamarin `kci_initiator` | **Proven** (handshake) |
 | Verified-PINNED mutual agreement | Tamarin `mutual_agreement` | **Proven** (handshake; TOFU excluded by design) |
 | Honest deniable + verified runs complete | `hs_executable`, `verified_executable` | **Proven** (exists-trace sanity) |
-| Ratchet message secrecy / FS / PQ-PCS after rekey | Tamarin (`model/ratchet.spthy`) | **In progress** — modelled line-for-line, chain-update proofs diverge under default heuristics; covered today by 122 tests, KAT vectors, fuzz |
+| Ratchet message secrecy / FS / PQ-PCS after rekey | Tamarin (`model/ratchet.spthy`) | **In progress** — modelled line-for-line, chain-update proofs diverge under default heuristics; covered today by 123 tests, KAT vectors, fuzz |
 | Deniability | `docs/deniability.md` + frame tripwire test | Classical argument documented; observational-equivalence proof **not claimed** |
 | Deniable-responder KCI | — | **False by construction** (anyone can encapsulate to B); deliberately no lemma |
 | TreeKEM PCS / fork / gap / replay | Tests | Chaos-tested, not machine-proved |

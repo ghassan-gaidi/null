@@ -10,7 +10,7 @@ by a gate or explicitly a limitation.
 Null is a **design-confident, formally verified at the establishment
 layer** messenger: the handshake is machine-proven (5/5 Tamarin lemmas,
 CI-enforced); the ratchet phase is modelled but not yet machine-proven
-(122 tests + KATs + fuzz in the meantime); the transport/endpoint story is
+(123 tests + KATs + fuzz in the meantime); the transport/endpoint story is
 engineered and tested but has *not* been hardened by a third-party audit,
 side-channel measurement (`dudect`), sanitizer fuzzing, or unbounded
 adversarial review. Use of `--verified` + out-of-band `i=` pinning is the
