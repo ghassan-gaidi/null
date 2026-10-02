@@ -300,10 +300,19 @@ pub struct SnowflakeTransport {
     pub rendezvous: String,
 }
 impl SnowflakeTransport {
+    /// Built-in rendezvous (placeholder until the operator configures a
+    /// real broker — see `with_rendezvous`).
+    pub const DEFAULT_RENDEZVOUS: &'static str = "snowflake-null-rendezvous";
+
     pub fn new() -> Self {
         Self {
-            rendezvous: "snowflake-null-rendezvous".into(),
+            rendezvous: Self::DEFAULT_RENDEZVOUS.into(),
         }
+    }
+
+    /// Operator-run broker domain (replaces the placeholder).
+    pub fn with_rendezvous(rendezvous: String) -> Self {
+        Self { rendezvous }
     }
     pub async fn dial_ep(&self, ep: &Endpoint) -> Result<TransportConn> {
         // WebRTC broker + domain-fronted rendezvous; stub circuit for tests.
@@ -338,10 +347,19 @@ pub struct WebTunnelTransport {
     pub front_domain: String,
 }
 impl WebTunnelTransport {
+    /// Built-in front domain (placeholder until the operator configures a
+    /// real front — see `with_front`).
+    pub const DEFAULT_FRONT: &'static str = "cdn.null.invalid";
+
     pub fn new() -> Self {
         Self {
-            front_domain: "cdn.null.invalid".into(),
+            front_domain: Self::DEFAULT_FRONT.into(),
         }
+    }
+
+    /// Operator-run front domain (replaces the placeholder).
+    pub fn with_front(front_domain: String) -> Self {
+        Self { front_domain }
     }
     pub async fn dial_ep(&self, ep: &Endpoint) -> Result<TransportConn> {
         // HTTPS-encapsulated; DPI sees normal TLS to front_domain.
@@ -508,8 +526,11 @@ impl Multiplexer {
         best.map(|(k, _)| k).unwrap_or(TransportKind::Tor)
     }
 
-    /// Dial with transparent failover across priority list.
-    pub async fn dial(&mut self, ep: &Endpoint) -> Result<TransportConn> {
+    /// In-memory stub circuit for loopback/tests: no packets leave the
+    /// process (`TransportConn::has_live_stream` is false). Real peers
+    /// MUST go through `dial_live` — calling this for a `.onion` peer
+    /// fails closed at the CLI, never silently.
+    pub async fn dial_stub(&mut self, ep: &Endpoint) -> Result<TransportConn> {
         let mut last_err = NullError::Transport("no transports".into());
         for kind in self.priority.clone() {
             let res = match kind {
@@ -657,8 +678,35 @@ mod tests {
             onion_host: "a".repeat(56),
             port: 80,
         };
-        let c = m.dial(&ep).await.unwrap();
+        let c = m.dial_stub(&ep).await.unwrap();
         assert!(matches!(c.kind, TransportKind::Obfs4 | TransportKind::Tor));
+    }
+
+    #[test]
+    fn pt_rendezvous_is_operator_configurable() {
+        assert!(!SnowflakeTransport::DEFAULT_RENDEZVOUS.is_empty());
+        assert!(!WebTunnelTransport::DEFAULT_FRONT.is_empty());
+        let s = SnowflakeTransport::with_rendezvous("op-broker.example".into());
+        assert_eq!(s.rendezvous, "op-broker.example");
+        let w = WebTunnelTransport::with_front("front.example".into());
+        assert_eq!(w.front_domain, "front.example");
+        // Propagation through the multiplexer operators actually use.
+        let mut m = Multiplexer::new(vec![TransportKind::Snowflake, TransportKind::Webtunnel]);
+        m.snowflake = SnowflakeTransport::with_rendezvous("op-run".into());
+        m.webtunnel = WebTunnelTransport::with_front("op-front".into());
+        assert_eq!(m.snowflake.rendezvous, "op-run");
+        assert_eq!(m.webtunnel.front_domain, "op-front");
+    }
+
+    #[tokio::test]
+    async fn dial_stub_is_in_memory_only() {
+        let mut m = Multiplexer::new(vec![TransportKind::Tor]);
+        let ep = Endpoint {
+            onion_host: "a".repeat(56),
+            port: 80,
+        };
+        let c = m.dial_stub(&ep).await.unwrap();
+        assert!(!c.has_live_stream(), "stub circuits carry no traffic");
     }
 
     #[test]

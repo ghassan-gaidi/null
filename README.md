@@ -10,7 +10,7 @@ provides **Level 3 post-quantum messaging security**: ongoing post-quantum
 rekeying inside a continuous triple ratchet, multi-transport censorship
 resistance, and hardware-aware key isolation — all in a terminal-native app.
 
-Everything below is implemented and tested in this repository: 114 tests green,
+Everything below is implemented and tested in this repository: 118 tests green,
 `clippy -D warnings` clean, reproducible builds verified bit-identical, and
 live two-process chats (deniable, verified, TUI) proven over real sockets.
 
@@ -246,6 +246,8 @@ null://<56-char-onion>.onion?k=<base64 ML-KEM-1024 ek>&i=<ml-dsa:fingerprint>&t=
 --deniable                   (default) strip all signature material
 --tui                        full-screen Ratatui interface (loopback or live)
 --transports <list>          priority order (default tor,i2p,nym)
+--snowflake-rendezvous <d>   Snowflake broker (default built-in placeholder)
+--webtunnel-front <d>        WebTunnel front domain (default built-in placeholder)
 --control-port <PORT>        provision ephemeral onion via Tor control
 --secure-input               evdev keystroke reading (needs root)
 --usbguard                   panic-wipe on new /dev nodes
@@ -270,7 +272,7 @@ today); `update check|apply` likewise. Stubs fail loudly until wired.
 
 ## Verification
 
-- **114 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
+- **118 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
   healing at message 51, lossless rekey-loss recovery, handshake codecs +
   fragmentation, TCP end-to-end (deniable *and* verified, incl.
   safety-number agreement), TreeKEM commits/openings/blanks, group

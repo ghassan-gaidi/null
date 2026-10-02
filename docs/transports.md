@@ -46,6 +46,12 @@ Null never embeds Tor or another anon daemon. Each transport dials a
 string whose host is the literal `listener` (never valid on the real
 network).
 
+The failover entry point is named what it is: `Multiplexer::dial_stub`.
+Loopback and tests call it openly; the CLI refuses to hand a stub to a
+real `.onion` peer — without `NULL_LIVE_TRANSPORT=1` it errors before
+any handshake (`transport_cli.rs` pins this), so a stub can never be
+mistaken for live failover.
+
 ## 3. Multiplexer: election and failover
 
 `Multiplexer::new(priority)` builds all six backends with per-transport
@@ -119,9 +125,12 @@ text. Note that the PT *name* and the shipped *binary* differ
 (`obfs4` → `obfs4proxy`, `snowflake` → `snowflake-client`,
 `webtunnel` → `webtunnel-client`), which the emitted lines get right —
 Tor's plugin name is `obfs4`, not `obfs4proxy`. Rendezvous/front-domain
-values in the current code are placeholders
-(`snowflake-null-rendezvous`, `cdn.null.invalid`) — see `docs/operations.md`
-and `contrib/` for the deployment runbook.
+default to placeholders (`snowflake-null-rendezvous`, `cdn.null.invalid`)
+until the operator configures real values: `--snowflake-rendezvous` /
+`--webtunnel-front` flags, else `$NULL_SNOWFLAKE_RENDEZVOUS` /
+`$NULL_WEBTUNNEL_FRONT` env, applied identically at both chat entry
+points — see `docs/operations.md` and `contrib/` for the deployment
+runbook.
 
 obfs4 also ships a scrambling layer for the stub path: a uniform-DH-style
 keystream `SHA256(secret ‖ counter)` XOR applied in 32-byte blocks,

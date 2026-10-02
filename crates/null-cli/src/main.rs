@@ -36,6 +36,14 @@ struct Args {
     /// Transports in priority order, e.g. tor,i2p,nym.
     #[arg(long, default_value = "tor,i2p,nym")]
     transports: String,
+    /// Snowflake broker domain (flag > $NULL_SNOWFLAKE_RENDEZVOUS >
+    /// built-in placeholder).
+    #[arg(long)]
+    snowflake_rendezvous: Option<String>,
+    /// WebTunnel front domain (flag > $NULL_WEBTUNNEL_FRONT >
+    /// built-in placeholder).
+    #[arg(long)]
+    webtunnel_front: Option<String>,
     /// Auto-lock seconds (default 30 min idle per §8.4 dead-man baseline).
     #[arg(long, default_value_t = 30 * 60)]
     auto_lock_secs: u64,
@@ -279,6 +287,19 @@ async fn main() -> Result<()> {
     }
     check_tui_secure_input(args.tui, args.secure_input)?;
 
+    // PT operator overrides: flag > env > built-in placeholder. Shared by
+    // both chat entry points so behavior is identical everywhere.
+    let snowflake_rendezvous = pick_configured(
+        &args.snowflake_rendezvous,
+        std::env::var("NULL_SNOWFLAKE_RENDEZVOUS").ok(),
+        null_transport::SnowflakeTransport::DEFAULT_RENDEZVOUS,
+    );
+    let webtunnel_front = pick_configured(
+        &args.webtunnel_front,
+        std::env::var("NULL_WEBTUNNEL_FRONT").ok(),
+        null_transport::WebTunnelTransport::DEFAULT_FRONT,
+    );
+
     // Subcommands bypass the chat bootstrap (no transports needed yet).
     if let Some(cmd) = args.cmd {
         return dispatch_cmd(cmd).await;
@@ -293,7 +314,7 @@ async fn main() -> Result<()> {
                 .map_err(|e: null_core::NullError| anyhow::anyhow!("{e}"))
         })
         .collect::<Result<_>>()?;
-    let mux = Multiplexer::new(transports);
+    let mux = make_mux(transports, &snowflake_rendezvous, &webtunnel_front);
     let elected = mux.elect().await;
     eprintln!("[null] transports ready; elected path: {elected}");
 
@@ -364,7 +385,20 @@ async fn main() -> Result<()> {
             &cs.onion_host[..8.min(cs.onion_host.len())]
         );
         let live = std::env::var("NULL_LIVE_TRANSPORT").as_deref() == Ok("1");
-        let mut mux = Multiplexer::new(cs.transports.clone());
+        let mut mux = make_mux(
+            cs.transports.clone(),
+            &snowflake_rendezvous,
+            &webtunnel_front,
+        );
+        if args.verified {
+            if let Some(fp) = &cs.identity_fingerprint {
+                eprintln!("[null] verified mode: peer fingerprint {fp}");
+            } else {
+                eprintln!("[null] verified mode requested but peer string has no i= fingerprint");
+            }
+        } else if args.deniable {
+            eprintln!("[null] deniable mode: no signatures (default)");
+        }
         // Direct-TCP escape hatch for local listener tests: a `null://`
         // string with host `listener` dials NULL_DIRECT_ADDR instead of a
         // SOCKS proxy (never used for real .onion peers).
@@ -410,26 +444,14 @@ async fn main() -> Result<()> {
                 }
             }
         } else {
-            let ep = Endpoint {
-                onion_host: cs.onion_host.clone(),
-                port: 80,
-            };
-            match mux.dial(&ep).await {
-                Ok(c) => eprintln!(
-                    "[null] circuit via {} (stub — set NULL_LIVE_TRANSPORT=1 for live dial)",
-                    c.kind
-                ),
-                Err(e) => eprintln!("[null] dial failed (all transports): {e}"),
-            }
-        }
-        if args.verified {
-            if let Some(fp) = cs.identity_fingerprint {
-                eprintln!("[null] verified mode: peer fingerprint {fp}");
-            } else {
-                eprintln!("[null] verified mode requested but peer string has no i= fingerprint");
-            }
-        } else if args.deniable {
-            eprintln!("[null] deniable mode: no signatures (default)");
+            // No stub fallback: an in-memory circuit carries no traffic,
+            // so handing one to a real peer would fail confusingly at the
+            // handshake. Loopback and the `listener` test hook are the
+            // only stub paths (handled above).
+            anyhow::bail!(
+                "real .onion peers need live transport: set NULL_LIVE_TRANSPORT=1 \
+                 with Tor/I2P/Nym daemons running"
+            );
         }
     } else {
         eprintln!("[null] paste peer's null:// string to begin handshake (or pass --peer).");
@@ -1441,6 +1463,29 @@ fn check_tui_secure_input(tui: bool, secure_input: bool) -> Result<()> {
     Ok(())
 }
 
+/// Flag > env > built-in default; empty values fall back instead of
+/// installing a blank.
+fn pick_configured(flag: &Option<String>, env_val: Option<String>, default: &str) -> String {
+    flag.as_deref()
+        .filter(|s| !s.is_empty())
+        .or(env_val.as_deref().filter(|s| !s.is_empty()))
+        .unwrap_or(default)
+        .to_string()
+}
+
+/// Multiplexer with operator PT overrides applied.
+fn make_mux(
+    priority: Vec<null_core::TransportKind>,
+    snowflake_rendezvous: &str,
+    webtunnel_front: &str,
+) -> Multiplexer {
+    let mut mux = Multiplexer::new(priority);
+    mux.snowflake =
+        null_transport::SnowflakeTransport::with_rendezvous(snowflake_rendezvous.to_string());
+    mux.webtunnel = null_transport::WebTunnelTransport::with_front(webtunnel_front.to_string());
+    mux
+}
+
 pub(crate) fn is_root() -> bool {
     #[cfg(unix)]
     {
@@ -1504,12 +1549,47 @@ mod tests {
     fn subcommands_parse_and_flags_stay_compatible() {
         let a = Args::try_parse_from(["null", "group", "info"]).unwrap();
         assert!(a.cmd.is_some(), "group subcommand must parse");
-        let u = Args::try_parse_from(["null", "update", "check", "--manifest", "m", "--binary", "b"]).unwrap();
+        let u = Args::try_parse_from([
+            "null",
+            "update",
+            "check",
+            "--manifest",
+            "m",
+            "--binary",
+            "b",
+        ])
+        .unwrap();
         assert!(u.cmd.is_some(), "update subcommand must parse");
         let b = Args::try_parse_from(["null", "--peer", "loopback", "--tui"]).unwrap();
         assert!(b.cmd.is_none(), "flat flags must mean chat path");
         assert_eq!(b.peer.as_deref(), Some("loopback"));
         assert!(b.tui);
+    }
+
+    /// PT operator overrides parse; precedence is flag > env > default,
+    /// and an empty flag falls back instead of installing a blank value.
+    #[test]
+    fn transport_overrides_parse_and_precedence() {
+        let a = Args::try_parse_from([
+            "null",
+            "--snowflake-rendezvous",
+            "flag.example",
+            "--webtunnel-front",
+            "f.example",
+        ])
+        .unwrap();
+        assert_eq!(a.snowflake_rendezvous.as_deref(), Some("flag.example"));
+        assert_eq!(a.webtunnel_front.as_deref(), Some("f.example"));
+        assert_eq!(
+            pick_configured(&a.snowflake_rendezvous, Some("env.example".into()), "dflt"),
+            "flag.example"
+        );
+        assert_eq!(
+            pick_configured(&None, Some("env.example".into()), "dflt"),
+            "env.example"
+        );
+        assert_eq!(pick_configured(&None, None, "dflt"), "dflt");
+        assert_eq!(pick_configured(&Some("".into()), None, "dflt"), "dflt");
     }
 
     /// `--secure-input` is line-mode only: the TUI reads keys through the

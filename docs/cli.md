@@ -44,8 +44,9 @@ doc keeps it honest.
 
 | Variable | Effect |
 |---|---|
-| `NULL_LIVE_TRANSPORT=1` | Force real daemon dialing; absent daemons become hard errors instead of virtual stubs. Any real anonymity use **requires** this on the dialing side |
+| `NULL_LIVE_TRANSPORT=1` | Force real daemon dialing; absent daemons become hard errors instead of virtual stubs. Any real anonymity use **requires** this on the dialing side; without it a real `.onion` peer is a hard error, not a stub |
 | `NULL_DIRECT_ADDR=host:port` | For `listener`-host strings only: raw TCP dial of a local test listener |
+| `NULL_SNOWFLAKE_RENDEZVOUS` / `NULL_WEBTUNNEL_FRONT` | PT broker/front domains when the matching flags are absent (flag wins; empty falls back to built-in) |
 
 ## 4. Verified-mode runtime behavior
 
