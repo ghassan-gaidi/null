@@ -1,7 +1,8 @@
 # Groups — Null-MLS (TreeKEM)
 
-> Status: library + tests only — no `null` CLI surface yet. The API below
-> is exercised by tests and `xtask`, not by any shipped binary.
+> Status: membership CLI live (`null group create|keygen|join|info|roster|
+> add|remove|update|sync`, pipe-oriented, RAM-only); message `send|recv`
+> packaging follows. Core protocol exercised by tests + `xtask`.
 
 Group messaging uses a real ratchet tree with post-quantum node keys:
 **MLS-shaped, not RFC 9420-conformant** — no interop claim is made. The

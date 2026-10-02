@@ -90,6 +90,22 @@ fn decode_keypackage(mut bytes: &[u8]) -> Result<(KeyPackage, &[u8])> {
     ))
 }
 
+impl KeyPackage {
+    /// Length-prefixed wire encoding (operator piping of KeyPackages).
+    pub fn encode(&self) -> Vec<u8> {
+        encode_keypackage(self)
+    }
+
+    /// Decode a KeyPackage; trailing bytes rejected (canonical encoding).
+    pub fn decode(bytes: &[u8]) -> Result<Self> {
+        let (kp, tail) = decode_keypackage(bytes)?;
+        if !tail.is_empty() {
+            return Err(NullError::Group("keypackage trailing bytes".into()));
+        }
+        Ok(kp)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupInfo {
     pub group_id: [u8; 32],

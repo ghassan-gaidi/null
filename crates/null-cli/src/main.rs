@@ -1,5 +1,6 @@
 //! `null` binary: bootstrap → discovery → communicate → wipe (§12).
 
+mod group;
 mod secure_input;
 
 use anyhow::Result;
@@ -80,15 +81,75 @@ struct GroupArgs {
 
 #[derive(clap::Subcommand, Debug)]
 enum GroupCmd {
+    /// Create a fresh one-member group; prints STATE + MEMBER.
     Create,
-    Join,
-    Info,
-    Roster,
-    Add,
-    Remove,
-    Update,
-    Send,
-    Recv,
+    /// Generate member identity material; prints MEMBER + KEYPACKAGE + DK.
+    Keygen {
+        /// 64-hex member id (random when omitted).
+        #[arg(long)]
+        member_id: Option<String>,
+    },
+    /// Join from a Welcome; prints STATE.
+    Join {
+        #[arg(long)]
+        welcome: String,
+        #[arg(long)]
+        keypackage: String,
+        #[arg(long)]
+        dk: String,
+        #[arg(long)]
+        member_id: String,
+    },
+    /// Show group id, epoch, member count (state via --state or stdin).
+    Info {
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// List roster as `ROSTER <hex> <pos>` lines.
+    Roster {
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// Add a member KeyPackage; prints COMMIT + WELCOME + STATE.
+    Add {
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        keypackage: String,
+    },
+    /// Remove a member; prints COMMIT + STATE.
+    Remove {
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        member_id: String,
+    },
+    /// Rotate our path (forward secrecy); prints COMMIT + STATE.
+    Update {
+        #[arg(long)]
+        state: Option<String>,
+    },
+    /// Ingest a broadcast commit; prints advanced STATE.
+    Sync {
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        commit: String,
+    },
+    /// Send a group message (lands in Task 5c).
+    Send {
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        message: Option<String>,
+    },
+    /// Receive a group message (lands in Task 5c).
+    Recv {
+        #[arg(long)]
+        state: Option<String>,
+        #[arg(long)]
+        package: Option<String>,
+    },
 }
 
 #[derive(clap::Args, Debug)]
@@ -112,8 +173,7 @@ async fn dispatch_cmd(cmd: Cmd) -> Result<()> {
 }
 
 async fn dispatch_group(cmd: GroupCmd) -> Result<()> {
-    let _ = cmd;
-    anyhow::bail!("group messaging CLI lands in Task 5 (library + tests only today)")
+    group::dispatch(cmd).await
 }
 
 async fn dispatch_update(cmd: UpdateCmd) -> Result<()> {

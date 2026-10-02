@@ -15,9 +15,11 @@ null-frame = { workspace = true }
 null-transport = { workspace = true }
 null-memory = { workspace = true }
 null-identity = { workspace = true }
+null-group = { workspace = true }
 null-session = { workspace = true }
 null-tui = { workspace = true }
 clap = { version = "4", features = ["derive"] }
+rand.workspace = true
 tokio.workspace = true
 anyhow = "1"
 signal-hook = "0.3"
