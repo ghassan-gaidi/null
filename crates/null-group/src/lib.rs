@@ -994,6 +994,45 @@ impl Group {
     /// our leaf key stays our long-term pair until our first update.
     pub fn join(env_bytes: &[u8], member_id: [u8; 32], dk: &KyberKeypair) -> Result<Self> {
         let env = WelcomePkg::decode(env_bytes)?;
+        // Geometry before crypto: a crafted Welcome must not build a
+        // silently broken tree (or overflow `leaf_node` arithmetic) — every
+        // roster position and our leaf must land inside the declared tree,
+        // and the roster must actually carry us at our leaf position.
+        // Otherwise join exits 0 with a state that can receive but never
+        // send (crossed joiner files in operator scripts).
+        let leaf_count = 1u32 << env.depth; // depth ≤ 20 per decode guard
+        let total_nodes = 2u32.saturating_mul(leaf_count).saturating_sub(1);
+        if env.leaf_pos >= leaf_count {
+            return Err(NullError::Group(
+                "welcome leaf position out of range".into(),
+            ));
+        }
+        for (_, pos) in &env.roster {
+            if *pos >= leaf_count {
+                return Err(NullError::Group(
+                    "welcome roster position out of range".into(),
+                ));
+            }
+        }
+        if !env
+            .roster
+            .iter()
+            .any(|(id, pos)| *id == member_id && *pos == env.leaf_pos)
+        {
+            return Err(NullError::Group(
+                "welcome roster does not carry joining member at leaf position".into(),
+            ));
+        }
+        for (idx, _) in &env.pubs {
+            if *idx >= total_nodes {
+                return Err(NullError::Group("welcome pub index out of range".into()));
+            }
+        }
+        for idx in &env.blanks {
+            if *idx >= total_nodes {
+                return Err(NullError::Group("welcome blank index out of range".into()));
+            }
+        }
         let k = dk
             .decapsulate(&env.ct)
             .map_err(|e| NullError::Group(format!("welcome decap: {e}")))?;
@@ -1653,6 +1692,50 @@ mod tests {
         assert!(
             format!("{err:?}").contains("too many"),
             "oversize blanks count must fail bounds, got: {err:?}"
+        );
+    }
+
+    /// Joining under an identity the Welcome roster does not carry must
+    /// fail at join time — not print a STATE that can receive but never
+    /// send ("unknown sender" on the first pack, self-healing only at the
+    /// next commit). Operator file mixups (two joiners' blobs crossed)
+    /// otherwise exit 0 with a broken state.
+    #[test]
+    fn join_rejects_member_id_outside_roster() {
+        let mut a = Group::create();
+        let (kp_b, dk_b) = real_kp(0x42);
+        let (welcome_bytes, _) = a.add(kp_b).unwrap();
+        // Right dk (opens the seal), wrong identity: C is not in the
+        // roster, so the join must refuse instead of succeeding broken.
+        let err = match Group::join(&welcome_bytes, [0xCC; 32], &dk_b) {
+            Ok(_) => panic!("join outside roster must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err:?}").contains("roster"),
+            "join outside roster must name the roster, got: {err:?}"
+        );
+    }
+
+    /// A Welcome naming leaf positions outside the declared tree must be
+    /// rejected (mirrors `decode_state`'s "leaf position out of range"):
+    /// `occupy`/`leaf_node` on unbounded positions would otherwise build
+    /// a silently broken tree that still exits 0.
+    #[test]
+    fn join_rejects_out_of_range_positions() {
+        let mut a = Group::create();
+        let (kp_b, dk_b) = real_kp(0x42);
+        let (welcome_bytes, _) = a.add(kp_b).unwrap();
+        let mut env = WelcomePkg::decode(&welcome_bytes).unwrap();
+        env.roster = vec![([0x42; 32], u32::MAX)];
+        env.leaf_pos = u32::MAX;
+        let err = match Group::join(&env.encode(), [0x42; 32], &dk_b) {
+            Ok(_) => panic!("out-of-range positions must fail"),
+            Err(e) => e,
+        };
+        assert!(
+            format!("{err:?}").contains("range") || format!("{err:?}").contains("roster"),
+            "out-of-range positions must fail loudly, got: {err:?}"
         );
     }
 }
