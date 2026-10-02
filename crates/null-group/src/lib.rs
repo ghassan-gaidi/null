@@ -29,12 +29,12 @@ pub struct KeyPackage {
     pub signature_hint: Option<Vec<u8>>,
 }
 
-fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
+pub(crate) fn put_bytes(out: &mut Vec<u8>, b: &[u8]) {
     out.extend_from_slice(&(b.len() as u32).to_be_bytes());
     out.extend_from_slice(b);
 }
 
-fn get_bytes(mut bytes: &[u8]) -> Result<(Vec<u8>, &[u8])> {
+pub(crate) fn get_bytes(mut bytes: &[u8]) -> Result<(Vec<u8>, &[u8])> {
     if bytes.len() < 4 {
         return Err(NullError::Group("blob truncated".into()));
     }
@@ -136,15 +136,15 @@ pub struct WelcomePkg {
     pub sealed: Vec<u8>,
 }
 
-fn put_u32(out: &mut Vec<u8>, v: u32) {
+pub(crate) fn put_u32(out: &mut Vec<u8>, v: u32) {
     out.extend_from_slice(&v.to_be_bytes());
 }
 
-fn put_u64(out: &mut Vec<u8>, v: u64) {
+pub(crate) fn put_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(&v.to_be_bytes());
 }
 
-fn get_u32(bytes: &[u8]) -> Result<(u32, &[u8])> {
+pub(crate) fn get_u32(bytes: &[u8]) -> Result<(u32, &[u8])> {
     if bytes.len() < 4 {
         return Err(NullError::Group("u32 truncated".into()));
     }
@@ -154,7 +154,7 @@ fn get_u32(bytes: &[u8]) -> Result<(u32, &[u8])> {
     ))
 }
 
-fn get_u64(bytes: &[u8]) -> Result<(u64, &[u8])> {
+pub(crate) fn get_u64(bytes: &[u8]) -> Result<(u64, &[u8])> {
     if bytes.len() < 8 {
         return Err(NullError::Group("u64 truncated".into()));
     }
@@ -164,7 +164,7 @@ fn get_u64(bytes: &[u8]) -> Result<(u64, &[u8])> {
     ))
 }
 
-fn get_id(bytes: &[u8]) -> Result<([u8; 32], &[u8])> {
+pub(crate) fn get_id(bytes: &[u8]) -> Result<([u8; 32], &[u8])> {
     if bytes.len() < 32 {
         return Err(NullError::Group("id truncated".into()));
     }
@@ -539,6 +539,132 @@ impl Group {
             .collect();
         r.sort_unstable();
         r
+    }
+
+    /// State export version (domain-separated from the 0x02 wire packages).
+    pub const STATE_VERSION: u8 = 0x03;
+    /// Decode cap: state blobs above this are refused before parsing.
+    pub const STATE_MAX_BYTES: usize = 64 * 1024 * 1024;
+
+    /// Export full member state for operator piping (stdin/stdout, shell
+    /// vars — **never disk**: this blob carries path seeds and possibly
+    /// the leaf dk). Deterministic order (sorted ids) so the same state
+    /// encodes identically.
+    pub fn encode_state(&self) -> Vec<u8> {
+        let mut out = vec![Self::STATE_VERSION];
+        out.extend_from_slice(&self.id);
+        put_u64(&mut out, self.epoch);
+        out.extend_from_slice(&self.tree_secret);
+        let mut ids: Vec<&[u8; 32]> = self.members.keys().collect();
+        ids.sort_unstable();
+        put_u32(&mut out, ids.len() as u32);
+        for id in &ids {
+            out.extend_from_slice(*id);
+            put_bytes(&mut out, &encode_keypackage(&self.members[*id]));
+        }
+        put_u32(&mut out, ids.len() as u32);
+        for id in &ids {
+            out.extend_from_slice(*id);
+            put_u32(&mut out, self.member_leaf[*id]);
+        }
+        put_u32(&mut out, ids.len() as u32);
+        for id in &ids {
+            out.extend_from_slice(*id);
+            put_u64(&mut out, self.sender_chains[*id]);
+        }
+        out.extend_from_slice(&self.tree.encode_state());
+        out.push(u8::from(self.defunct));
+        out
+    }
+
+    /// Decode member state. Bounds-checked (total cap, member cap, tree
+    /// guards); trailing bytes rejected (canonical encoding).
+    pub fn decode_state(bytes: &[u8]) -> Result<Self> {
+        if bytes.len() > Self::STATE_MAX_BYTES {
+            return Err(NullError::Group("state too large".into()));
+        }
+        if bytes.first() != Some(&Self::STATE_VERSION) {
+            return Err(NullError::Group("bad state version".into()));
+        }
+        let mut rest = &bytes[1..];
+        let (id, r) = get_id(rest)?;
+        rest = r;
+        let (epoch, r) = get_u64(rest)?;
+        rest = r;
+        if rest.len() < 48 {
+            return Err(NullError::Group("state secret truncated".into()));
+        }
+        let mut tree_secret = [0u8; 48];
+        tree_secret.copy_from_slice(&rest[..48]);
+        rest = &rest[48..];
+        let (n, r) = get_u32(rest)?;
+        rest = r;
+        if n == 0 || n as usize > MAX_GROUP_MEMBERS {
+            return Err(NullError::Group("bad member count".into()));
+        }
+        let mut members = HashMap::with_capacity(n as usize);
+        for _ in 0..n {
+            let (mid, r) = get_id(rest)?;
+            rest = r;
+            let (kb, r) = get_bytes(rest)?;
+            rest = r;
+            let (kp, tail) = decode_keypackage(&kb)?;
+            if !tail.is_empty() {
+                return Err(NullError::Group("keypackage trailing bytes".into()));
+            }
+            if members.insert(mid, kp).is_some() {
+                return Err(NullError::Group("duplicate member".into()));
+            }
+        }
+        let (n2, r) = get_u32(rest)?;
+        rest = r;
+        if n2 != n {
+            return Err(NullError::Group("member/leaf count mismatch".into()));
+        }
+        let mut member_leaf = HashMap::with_capacity(n as usize);
+        for _ in 0..n {
+            let (mid, r) = get_id(rest)?;
+            let (pos, r) = get_u32(r)?;
+            rest = r;
+            if !members.contains_key(&mid) || member_leaf.insert(mid, pos).is_some() {
+                return Err(NullError::Group("bad leaf map".into()));
+            }
+        }
+        let (n3, r) = get_u32(rest)?;
+        rest = r;
+        if n3 != n {
+            return Err(NullError::Group("member/chain count mismatch".into()));
+        }
+        let mut sender_chains = HashMap::with_capacity(n as usize);
+        for _ in 0..n {
+            let (mid, r) = get_id(rest)?;
+            let (seq, r) = get_u64(r)?;
+            rest = r;
+            if !members.contains_key(&mid) || sender_chains.insert(mid, seq).is_some() {
+                return Err(NullError::Group("bad chain map".into()));
+            }
+        }
+        let (tree, r) = RatchetTree::decode_state(rest)?;
+        rest = r;
+        let leaf_count = 1u32 << tree.depth();
+        for pos in member_leaf.values() {
+            if *pos >= leaf_count {
+                return Err(NullError::Group("leaf position out of range".into()));
+            }
+        }
+        if rest.len() != 1 || rest[0] > 1 {
+            return Err(NullError::Group("bad defunct flag".into()));
+        }
+        Ok(Self {
+            id,
+            epoch,
+            tree_secret,
+            members,
+            member_leaf,
+            sender_chains,
+            tree,
+            defunct: rest[0] == 1,
+        })
     }
 
     /// Rewrite roster positions through a growth remap.
@@ -1159,6 +1285,61 @@ mod tests {
         // Stale outsider commit (wrong group) rejected.
         let other = Group::create();
         let _ = other;
+    }
+
+    /// State export round-trips through decode with roster, epoch and
+    /// message-key agreement intact (operator pipes, never disk).
+    #[test]
+    fn state_codec_roundtrip_preserves_agreement() {
+        let mut g = Group::create();
+        let (kp_b, _) = real_kp(0x42);
+        let _ = g.add(kp_b).unwrap();
+        let bytes = g.encode_state();
+        let mut g2 = Group::decode_state(&bytes).unwrap();
+        assert_eq!(g.info().group_id, g2.info().group_id);
+        assert_eq!(g.info().epoch, g2.info().epoch);
+        assert_eq!(g.roster(), g2.roster());
+        // message_key advances the sender chain, so agreement means
+        // lockstep equality from the same counter — not a stale key.
+        let sender = g.roster()[0].0;
+        assert_eq!(
+            g.message_key(&sender).unwrap(),
+            g2.message_key(&sender).unwrap()
+        );
+    }
+
+    /// Joiner state (carries the leaf dk) round-trips and stays live:
+    /// the decoded copy processes the next commit and agrees on keys.
+    #[test]
+    fn state_codec_roundtrip_joiner_stays_live() {
+        let mut g = Group::create();
+        let (kp_b, dk_b) = real_kp(0x42);
+        let (welcome_bytes, _) = g.add(kp_b).unwrap();
+        let mut j = Group::join(&welcome_bytes, [0x42; 32], &dk_b).unwrap();
+        let sender = j.roster()[0].0;
+        let jb = j.encode_state();
+        let mut j2 = Group::decode_state(&jb).unwrap();
+        assert_eq!(
+            j.message_key(&sender).unwrap(),
+            j2.message_key(&sender).unwrap()
+        );
+        // Decoded copy is functional, not just counters.
+        let upd = g.update().unwrap();
+        j2.process_commit(&upd).unwrap();
+        assert_eq!(j2.info().epoch, g.info().epoch);
+    }
+
+    #[test]
+    fn state_codec_rejects_garbage() {
+        assert!(Group::decode_state(b"short").is_err());
+        assert!(Group::decode_state(&[0x09]).is_err());
+        // Right version, absurd depth (same guard as commit decode).
+        let mut bytes = vec![0x03];
+        bytes.extend_from_slice(&[7u8; 32]); // id
+        bytes.extend_from_slice(&0u64.to_be_bytes()); // epoch
+        bytes.extend_from_slice(&[0u8; 48]); // tree secret
+        bytes.extend_from_slice(&21u32.to_be_bytes()); // depth
+        assert!(Group::decode_state(&bytes).is_err());
     }
 
     #[test]

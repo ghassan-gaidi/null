@@ -144,6 +144,26 @@ impl KyberKeypair {
     pub fn ek_bytes(&self) -> Vec<u8> {
         self.ek.as_bytes().as_slice().to_vec()
     }
+
+    /// Raw decapsulation-key bytes (state export only — the operator's own
+    /// key, piped through RAM, never written to disk by this crate).
+    pub fn dk_bytes(&self) -> Vec<u8> {
+        self.dk.as_bytes().as_slice().to_vec()
+    }
+
+    /// Rebuild a pair from exported parts (state import). Length-checked;
+    /// garbage fails instead of producing a weak key.
+    pub fn from_parts(ek_bytes: &[u8], dk_bytes: &[u8]) -> Result<Self> {
+        use hybrid_array::Array;
+        let ek_arr: Encoded<MlKem1024Ek> = Array::try_from(ek_bytes)
+            .map_err(|_| NullError::Crypto(format!("bad kyber ek len {}", ek_bytes.len())))?;
+        let dk_arr: Encoded<MlKem1024Dk> = Array::try_from(dk_bytes)
+            .map_err(|_| NullError::Crypto(format!("bad kyber dk len {}", dk_bytes.len())))?;
+        Ok(Self {
+            ek: MlKem1024Ek::from_bytes(&ek_arr),
+            dk: MlKem1024Dk::from_bytes(&dk_arr),
+        })
+    }
 }
 
 /// One-shot encapsulate to a raw ek blob (for handshake / rekey frames).
@@ -1327,6 +1347,19 @@ mod tests {
             initiator.finalize(&resp).is_err(),
             "empty ek echo must fail closed"
         );
+    }
+
+    /// `from_parts` round-trips a live pair and rejects bad lengths.
+    /// (Positive path also guarded by null-group's joiner state test;
+    /// this locks the rejection arms directly.)
+    #[test]
+    fn keypair_parts_roundtrip_and_reject() {
+        let kp = KyberKeypair::generate();
+        let rt = KyberKeypair::from_parts(&kp.ek_bytes(), &kp.dk_bytes()).unwrap();
+        assert_eq!(rt.ek_bytes(), kp.ek_bytes());
+        assert_eq!(rt.dk_bytes(), kp.dk_bytes());
+        assert!(KyberKeypair::from_parts(b"short", &kp.dk_bytes()).is_err());
+        assert!(KyberKeypair::from_parts(&kp.ek_bytes(), b"short").is_err());
     }
 
     #[test]

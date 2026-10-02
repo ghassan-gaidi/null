@@ -13,6 +13,26 @@ use null_crypto::{kyber_encap_to, KyberKeypair};
 use sha2::Sha384;
 use std::collections::{HashMap, HashSet};
 
+/// Decode a bounded set of indices (blanks, occupancy). Shared by the two
+/// call sites in `RatchetTree::decode_state`.
+fn decode_idx_set(bytes: &[u8], bound: u32) -> Result<(HashSet<u32>, &[u8])> {
+    use crate::get_u32;
+    let (n, mut rest) = get_u32(bytes)?;
+    if n > bound {
+        return Err(NullError::Group("index set too large".into()));
+    }
+    let mut set = HashSet::with_capacity(n as usize);
+    for _ in 0..n {
+        let (idx, r) = get_u32(rest)?;
+        rest = r;
+        if idx >= bound {
+            return Err(NullError::Group("index out of range".into()));
+        }
+        set.insert(idx);
+    }
+    Ok((set, rest))
+}
+
 fn parent(i: u32) -> Option<u32> {
     if i == 0 {
         None
@@ -168,6 +188,145 @@ impl RatchetTree {
     pub(crate) fn set_own_leaf(&mut self, pos: u32, dk: Option<KyberKeypair>) {
         self.own_leaf = pos;
         self.leaf_dk = dk;
+    }
+
+    /// Export tree state for operator piping (carries path seeds and
+    /// possibly the leaf dk — RAM/pipes only, never disk). Deterministic
+    /// field order (sorted indices) so the same state encodes identically.
+    pub(crate) fn encode_state(&self) -> Vec<u8> {
+        use crate::{put_bytes, put_u32};
+        let mut out = Vec::new();
+        put_u32(&mut out, self.depth);
+        put_u32(&mut out, self.own_leaf);
+        let mut blanks: Vec<u32> = self.blanks.iter().copied().collect();
+        blanks.sort_unstable();
+        put_u32(&mut out, blanks.len() as u32);
+        for b in blanks {
+            put_u32(&mut out, b);
+        }
+        let mut occupied: Vec<u32> = self.occupied.iter().copied().collect();
+        occupied.sort_unstable();
+        put_u32(&mut out, occupied.len() as u32);
+        for o in occupied {
+            put_u32(&mut out, o);
+        }
+        let mut pubs: Vec<(&u32, &Vec<u8>)> = self.pubs.iter().collect();
+        pubs.sort_unstable_by_key(|(k, _)| **k);
+        put_u32(&mut out, pubs.len() as u32);
+        for (idx, ek) in pubs {
+            put_u32(&mut out, *idx);
+            put_bytes(&mut out, ek);
+        }
+        let mut seeds: Vec<(&u32, &[u8; 64])> = self.own_seeds.iter().collect();
+        seeds.sort_unstable_by_key(|(k, _)| **k);
+        put_u32(&mut out, seeds.len() as u32);
+        for (idx, seed) in seeds {
+            put_u32(&mut out, *idx);
+            out.extend_from_slice(seed);
+        }
+        match &self.leaf_dk {
+            Some(kp) => {
+                out.push(1);
+                put_bytes(&mut out, &kp.ek_bytes());
+                put_bytes(&mut out, &kp.dk_bytes());
+            }
+            None => out.push(0),
+        }
+        out
+    }
+
+    /// Decode tree state. Bounds-checked: depth ≤ 20 (same guard as commit
+    /// decode — the tree allocates by depth), indices in range, fixed seed
+    /// length, known leaf-dk flag. Returns the tree + remaining bytes.
+    pub(crate) fn decode_state(mut bytes: &[u8]) -> Result<(Self, &[u8])> {
+        use crate::{get_bytes, get_u32};
+        use null_crypto::KyberKeypair;
+        let (depth, r) = get_u32(bytes)?;
+        bytes = r;
+        if depth > 20 {
+            return Err(NullError::Group("absurd tree depth".into()));
+        }
+        let leaf_count = 1u32 << depth;
+        let total_nodes = 2u32.saturating_mul(leaf_count).saturating_sub(1);
+        let (own_leaf, r) = get_u32(bytes)?;
+        bytes = r;
+        if own_leaf >= leaf_count {
+            return Err(NullError::Group("own leaf out of range".into()));
+        }
+        let (blanks, r) = decode_idx_set(bytes, total_nodes)?;
+        bytes = r;
+        let (occupied, r) = decode_idx_set(bytes, leaf_count)?;
+        bytes = r;
+        let (n_pubs, r) = get_u32(bytes)?;
+        bytes = r;
+        if n_pubs > total_nodes {
+            return Err(NullError::Group("pubs too large".into()));
+        }
+        let mut pubs = HashMap::with_capacity(n_pubs as usize);
+        for _ in 0..n_pubs {
+            let (idx, r) = get_u32(bytes)?;
+            bytes = r;
+            if idx >= total_nodes {
+                return Err(NullError::Group("pub index out of range".into()));
+            }
+            let (ek, r) = get_bytes(bytes)?;
+            bytes = r;
+            if ek.len() > 2048 {
+                return Err(NullError::Group("pub ek too large".into()));
+            }
+            pubs.insert(idx, ek);
+        }
+        let (n_seeds, r) = get_u32(bytes)?;
+        bytes = r;
+        if n_seeds > total_nodes {
+            return Err(NullError::Group("seeds too large".into()));
+        }
+        let mut own_seeds = HashMap::with_capacity(n_seeds as usize);
+        for _ in 0..n_seeds {
+            let (idx, r) = get_u32(bytes)?;
+            bytes = r;
+            if idx >= total_nodes {
+                return Err(NullError::Group("seed index out of range".into()));
+            }
+            if bytes.len() < 64 {
+                return Err(NullError::Group("seed truncated".into()));
+            }
+            let mut seed = [0u8; 64];
+            seed.copy_from_slice(&bytes[..64]);
+            bytes = &bytes[64..];
+            own_seeds.insert(idx, seed);
+        }
+        if bytes.is_empty() {
+            return Err(NullError::Group("leaf dk flag missing".into()));
+        }
+        let leaf_dk = match bytes[0] {
+            0 => {
+                bytes = &bytes[1..];
+                None
+            }
+            1 => {
+                let (ek, r) = get_bytes(&bytes[1..])?;
+                let (dk, r) = get_bytes(r)?;
+                bytes = r;
+                Some(
+                    KyberKeypair::from_parts(&ek, &dk)
+                        .map_err(|_| NullError::Group("bad leaf keypair bytes".into()))?,
+                )
+            }
+            _ => return Err(NullError::Group("bad leaf dk flag".into())),
+        };
+        Ok((
+            Self {
+                depth,
+                blanks,
+                occupied,
+                pubs,
+                own_seeds,
+                leaf_dk,
+                own_leaf,
+            },
+            bytes,
+        ))
     }
 
     pub fn leaf_count(&self) -> u32 {

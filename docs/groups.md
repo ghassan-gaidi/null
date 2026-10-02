@@ -100,7 +100,21 @@ so committers and receivers stay sequence-aligned across commits.
   `blanked`/`updated`/`bundles` each ≤ `1 << 20`.
 - Envelope version byte `0x02` on both `TreeCommit` and `WelcomePkg`.
 
-## 7. Limits and non-claims
+## 7. State export (operator piping)
+
+`Group::encode_state` / `decode_state` (version byte `0x03`) export full
+member state so the CLI can thread groups through invocations without a
+daemon or disk: state travels over stdin/stdout (base64) and lives in
+pipes and shell variables — RAM only, like everything else.
+
+- **This blob carries secrets** (path seeds, possibly the leaf dk).
+  The tool never writes it anywhere; operators must not redirect it to
+  disk either. Pipe it.
+- Decode guards mirror the wire ones: 64 MiB total cap, member counts ≤
+  `50000`, tree depth ≤ 20, indices range-checked, trailing bytes
+  rejected, canonical field order.
+
+## 8. Limits and non-claims
 
 - Up to `50000` members (the MLS protocol limit).
 - MLS-*shaped*: same ideas as RFC 9420 (ratchet trees, resolutions,
@@ -112,16 +126,20 @@ so committers and receivers stay sequence-aligned across commits.
 - Group state is memory-only; a defunct member's group state zeroizes on
   drop.
 
-## 8. Test provenance
+## 9. Test provenance
 
 - `commit_cost_is_sublinear`: 8 members, ≤ 3 bundles per commit —
   the O(log n) claim.
 - `commit_with_absurd_depth_rejected`: depth 21 refused at decode; depth
   20 passes the guard.
+- `state_codec_roundtrip_preserves_agreement`,
+  `state_codec_roundtrip_joiner_stays_live`, `state_codec_rejects_garbage`:
+  state export round-trips (creator and joiner), decoded copies stay live
+  and agree on message keys.
 - Fork/gap/replay, removal-defunct, welcome-join roundtrips, epoch
   chaining, multi-committer convergence — all in `crates/null-group`.
 
-## 9. Relationship to the rest of the stack
+## 10. Relationship to the rest of the stack
 
 - Group node keys come from `null-crypto`'s deterministic Kyber keygen
   (same FIPS 203 instantiation as the handshake).
