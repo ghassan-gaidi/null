@@ -1005,6 +1005,19 @@ async fn graceful_quit(
     drain_inbound(conn, inbox, ad_in).await;
 }
 
+/// TUI quit sequence (the testable half of the `Esc` path): announce
+/// goodbye, then drain inbound briefly so the peer's in-flight messages
+/// still print. The caller restores the terminal first and wipes+exits
+/// after (`secure_exit` is `-> !` and cannot run in tests, so it stays
+/// outside this function).
+async fn tui_quit_path(
+    conn: &mut null_transport::TransportConn,
+    inbox: &mut null_session::Inbox,
+    ad_in: &[u8],
+) {
+    graceful_quit(conn, inbox, ad_in).await;
+}
+
 /// Read inbound for up to ~2s, printing texts (peer goodbye included).
 async fn drain_inbound(
     conn: &mut null_transport::TransportConn,
@@ -1089,6 +1102,7 @@ async fn chat_loop_tui(
                         AppAction::None => {}
                         AppAction::Quit => {
                             restore(&mut term);
+                            tui_quit_path(&mut conn, &mut inbox, ad_in).await;
                             return Ok(());
                         }
                         AppAction::Wipe => {
@@ -1204,5 +1218,52 @@ pub(crate) fn is_root() -> bool {
     #[cfg(not(unix))]
     {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_conn(stream: tokio::net::TcpStream) -> null_transport::TransportConn {
+        null_transport::TransportConn::new_live(
+            null_core::TransportKind::Tor,
+            null_transport::Endpoint {
+                onion_host: "test".into(),
+                port: 80,
+            },
+            stream,
+        )
+    }
+
+    /// The TUI `Esc` path must deliver an orderly goodbye to the peer
+    /// (parity with line-mode `/quit`), not an RST disconnect.
+    #[tokio::test]
+    async fn tui_quit_delivers_goodbye_to_peer() {
+        // Sessions via deniable handshake (mirrors null-session's helper).
+        let kp_b = null_crypto::KyberKeypair::generate();
+        let ek_b = kp_b.ek_bytes();
+        let (init, init_msg) = null_crypto::HandshakeInitiator::initiate(&ek_b).unwrap();
+        let (resp, sess_b, _) = null_crypto::respond(&init_msg, &kp_b).unwrap();
+        let sess_a = init.finalize(&resp).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap().0 });
+        let cli_stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let srv_stream = accept.await.unwrap();
+
+        let mut conn_a = test_conn(cli_stream);
+        let mut conn_b = test_conn(srv_stream);
+        let mut inbox_a = null_session::Inbox::new(sess_a);
+        let mut inbox_b = null_session::Inbox::new(sess_b);
+        let ad = null_session::ad_for("alice", "bob");
+
+        // The exact path the TUI Quit arm calls.
+        tui_quit_path(&mut conn_a, &mut inbox_a, &ad).await;
+
+        let raw = conn_b.recv_blob().await.unwrap();
+        let out = inbox_b.receive_batch(&raw, &ad).unwrap();
+        assert!(out.goodbye, "peer must observe an orderly goodbye");
     }
 }

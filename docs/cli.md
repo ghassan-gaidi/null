@@ -81,7 +81,7 @@ When `--verified`:
 | `/unlock` | Unlocks; **duress PIN `0000` triggers the panic wipe** instead |
 | `/copy` | Copies the last peer message; clipboard auto-clears after 5 s in a background thread (Wayland `wl-copy` zombies reaped) |
 | Ctrl-C | Panic wipe + exit 0 |
-| Esc (TUI) | Quit — restores terminal and wipes; no goodbye frame is sent (known gap, see §10) |
+| Esc (TUI) | Quit — restores terminal, sends goodbye + drains inbound ~2 s, then wipes |
 
 Auto-lock: after `--auto-lock-secs` (default `1800` s) idle, the session
 locks and demands the PIN. Dead-man: `--dead-man-secs` defaults to `0`
@@ -116,9 +116,8 @@ exits — it is a deliberate operator choice.
 
 ## 10. Known honest edge cases
 
-- The TUI quit path (`Esc`) restores the terminal and wipes; the goodbye
-  frame is sent by the *live line-mode* quit path — the TUI path's goodbye
-  is an acknowledged gap (`docs/security-posture.md`).
+- The TUI quit path (`Esc`) sends goodbye + drains inbound before wipe,
+  matching the *live line-mode* quit path.
 - `--control-port` provisioning failure prints an error but does not kill
   the session (you can still run over the pre-provisioned onion).
 - The `listener` host and `NULL_DIRECT_ADDR` are test hooks; production
