@@ -10,7 +10,7 @@ by a gate or explicitly a limitation.
 Null is a **design-confident, formally verified at the establishment
 layer** messenger: the handshake is machine-proven (5/5 Tamarin lemmas,
 CI-enforced); the ratchet phase is modelled but not yet machine-proven
-(97 tests + KATs + fuzz in the meantime); the transport/endpoint story is
+(98 tests + KATs + fuzz in the meantime); the transport/endpoint story is
 engineered and tested but has *not* been hardened by a third-party audit,
 side-channel measurement (`dudect`), sanitizer fuzzing, or unbounded
 adversarial review. Use of `--verified` + out-of-band `i=` pinning is the
@@ -91,10 +91,9 @@ proof.
 - TUI quit path (`Esc`) sends goodbye + drains inbound (~2 s) before wipe,
   matching line-mode `/quit` (parity fixed; a TUI peer now sees an orderly
   goodbye).
-- TUI ignores `--secure-input`: the evdev key reader is wired only into the
-  line-mode loop, so `--tui --secure-input` silently falls back to terminal
-  input with only a table-cell warning. Passing both flags currently buys
-  nothing.
+- `--tui --secure-input` is rejected at startup: evdev grabbing feeds the
+  line-mode reader only, so the combination fails closed instead of
+  silently running on terminal input.
 - Deniable `finalize` falls back to the advertised `k=` when the response
   ek is empty (weaker than verified mode's hard fail).
 - Receive-side rekeys: a mostly-silent peer still fires a rekey on its own

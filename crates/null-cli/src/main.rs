@@ -66,6 +66,7 @@ async fn main() -> Result<()> {
     if args.secure_input && !is_root() {
         eprintln!("[null] WARN: --secure-input needs root; falling back to /dev/tty");
     }
+    check_tui_secure_input(args.tui, args.secure_input)?;
 
     // Bootstrap: transports.
     let transports: Vec<null_core::TransportKind> = args
@@ -1210,6 +1211,20 @@ fn secure_exit() -> ! {
     std::process::exit(0);
 }
 
+/// Reject `--tui --secure-input`: evdev grabbing (`secure_input`) feeds the
+/// line-mode reader only; the TUI consumes crossterm key events from the
+/// terminal, so the flag could never apply there. Fail closed instead of
+/// silently running unprotected.
+fn check_tui_secure_input(tui: bool, secure_input: bool) -> Result<()> {
+    if tui && secure_input {
+        anyhow::bail!(
+            "--secure-input is line-mode only: the TUI reads keys through the terminal, \
+             so evdev grabbing cannot apply; run without --tui or without --secure-input"
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn is_root() -> bool {
     #[cfg(unix)]
     {
@@ -1265,5 +1280,16 @@ mod tests {
         let raw = conn_b.recv_blob().await.unwrap();
         let out = inbox_b.receive_batch(&raw, &ad).unwrap();
         assert!(out.goodbye, "peer must observe an orderly goodbye");
+    }
+
+    /// `--secure-input` is line-mode only: the TUI reads keys through the
+    /// terminal, so evdev grabbing cannot apply. Combining the flags must
+    /// fail loudly, never silently fall back.
+    #[test]
+    fn tui_plus_secure_input_is_rejected() {
+        assert!(check_tui_secure_input(true, true).is_err());
+        assert!(check_tui_secure_input(true, false).is_ok());
+        assert!(check_tui_secure_input(false, true).is_ok());
+        assert!(check_tui_secure_input(false, false).is_ok());
     }
 }

@@ -91,8 +91,9 @@ exits — it is a deliberate operator choice.
 ## 7. Secure input
 
 - `--secure-input` needs root + evdev; without root it warns and falls
-  back to `/dev/tty`; in TUI mode it is ignored with a warning (the TUI
-  owns the keyboard).
+  back to `/dev/tty`. Combining `--tui --secure-input` is a hard error:
+  evdev grabbing feeds the line-mode reader only, and the TUI owns the
+  keyboard — failing closed beats silently running unprotected.
 - Input arrives over a channel fed by both stdin and the grabbed-keyboard
   reader; the evdev path retries on read errors.
 
