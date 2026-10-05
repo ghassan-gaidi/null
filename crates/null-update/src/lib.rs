@@ -230,7 +230,7 @@ fn hex_encode(b: impl AsRef<[u8]>) -> String {
 }
 
 fn hex_decode(h: &str) -> Result<Vec<u8>> {
-    if !h.len().is_multiple_of(2) || !h.chars().all(|c| c.is_ascii_hexdigit()) {
+    if h.len() % 2 != 0 || !h.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(NullError::Update("bad hex".into()));
     }
     (0..h.len())
