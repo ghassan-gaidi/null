@@ -164,10 +164,22 @@ impl SoftwareHsm {
     pub fn new() -> Self {
         let machine_id = std::fs::read("/etc/machine-id")
             .ok()
-            .map(|b| b.trim_ascii().to_vec())
+            .map(|b| trim_ascii_compat(&b))
             .unwrap_or_else(|| b"unknown-machine".to_vec());
         Self { machine_id }
     }
+}
+
+/// `u8::trim_ascii` is 1.80+; same semantics on the 1.75 MSRV.
+fn trim_ascii_compat(b: &[u8]) -> Vec<u8> {
+    let mut s = b;
+    while s.first().is_some_and(|c| c.is_ascii_whitespace()) {
+        s = &s[1..];
+    }
+    while s.last().is_some_and(|c| c.is_ascii_whitespace()) {
+        s = &s[..s.len() - 1];
+    }
+    s.to_vec()
 }
 
 impl Default for SoftwareHsm {
@@ -237,6 +249,15 @@ impl HardwareHsmProbe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn trim_ascii_compat_trims_both_ends_only() {
+        assert_eq!(trim_ascii_compat(b"  abc\n"), b"abc");
+        assert_eq!(trim_ascii_compat(b"abc"), b"abc");
+        assert_eq!(trim_ascii_compat(b" \t\r\n"), b"");
+        assert_eq!(trim_ascii_compat(b""), b"");
+        assert_eq!(trim_ascii_compat(b"a b"), b"a b");
+    }
 
     #[test]
     fn hardened_roundtrip_and_wipe() {

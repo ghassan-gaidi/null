@@ -17,7 +17,7 @@ provides **ongoing post-quantum rekeying inside a continuous triple ratchet**
 multi-transport censorship resistance, and hardware-presence-aware key
 handling — all in a terminal-native app.
 
-Everything below is implemented and tested in this repository: 123 tests green,
+Everything below is implemented and tested in this repository: 124 tests green,
 `clippy -D warnings` clean, reproducible builds verified bit-identical, and
 live two-process chats (deniable, verified, TUI) proven over real sockets.
 
@@ -296,7 +296,7 @@ state for groups/rosters; explicit keys and paths for updates).
 
 ## Verification
 
-- **123 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
+- **124 tests**, all passing: ratchet roundtrips, out-of-order bursts, rekey
   healing at message 51, lossless rekey-loss recovery, handshake codecs +
   fragmentation, TCP end-to-end (deniable *and* verified, incl.
   safety-number agreement), TreeKEM commits/openings/blanks, group
