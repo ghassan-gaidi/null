@@ -35,6 +35,9 @@ jobs:
           unzip -o -q maude.zip -d maude-dist
           echo "$PWD/maude-dist" >> "$GITHUB_PATH"
           export MAUDE_LIB="$PWD/maude-dist"
+          # NOTE: $GITHUB_PATH takes effect only in LATER steps, so put
+          # maude on PATH explicitly for this step's smoke check.
+          export PATH="$PWD/maude-dist:$PATH"
           maude --version
 
       - name: Install pinned tamarin-prover 1.12.0 (sha256-checked)
