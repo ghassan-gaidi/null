@@ -76,9 +76,9 @@ on `model/**` changes only.
 - **Integration suites** in `crates/*/tests/`: TCP end-to-end
   (`e2e_tcp.rs`), deniability tripwire (`deniability.rs`), multi-device
   (`multidevice.rs`), downgrade matrix (`downgrade.rs` — 10 cases).
-- **Live proofs**: `crates/null-cli` tests scripted two-process chats
-  (deniable + verified-pinned) and pty-driven TUI runs over loopback and a
-  live apex listener.
+- **Live exercises**: `crates/null-cli` tests scripted two-process chats
+  (deniable + verified-pinned) and headless TUI runs over loopback and a
+  live listener.
 - **Deterministic fuzz**: `cargo xtask fuzz` (stable channel, no
   cargo-fuzz/libfuzzer). See `docs/testing.md` for the full matrix.
 

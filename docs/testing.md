@@ -17,7 +17,7 @@ failure mode.
 | Group | TreeKEM commits, welcomes, removal, forks | `null-group` |
 | Update | hybrid sigs, downgrade floor, gossip | `null-update` |
 | Transport | multiplexer, obfs4, loopback, blob batching cap | `null-transport` (11 tests) |
-| CLI | two-process chats, pty TUI sessions | `null-cli` |
+| CLI | two-process chats, headless TUI sessions | `null-cli` |
 
 **123** test attributes workspace-wide (`#[test]` + `#[tokio::test]`,
 including the `#[test]` inside the `ratchet_interleave.rs` `proptest!`
@@ -49,7 +49,7 @@ randomized flows per execution.
 |---|---|
 | Handshake fragmentation (2 frames, `HS_FRAG_MAX = 1900`) | codec + reassembler tests; rejects interleaving/unknown tags |
 | TCP end-to-end (deniable + verified, safety-number agreement on both sides) | `e2e_tcp.rs` |
-| Live two-process chats + pty-driven TUI (loopback and live listener) | `null-cli` tests |
+| Live two-process chats + headless TUI (loopback and live listener) | `null-cli` tests (binary subprocesses over pipes/sockets; ratatui TestBackend rendering in-crate — no pty harness exists) |
 | Goodbye + drain (no RST loss) | quit-path tests: goodbye frame first, ~2 s inbound drain |
 | Traffic shaping | `TrafficShaper`: capacity `5` burst, refill 0.5/s (`SHAPER_BASE_INTERVAL_MS = 2000`), uniform 1–3 s clamped 0.5–4 s; dummy frames at shaped rate during idle | cargo test |
 | Fan-out blob batching | `encode_batch`/`decode_batch` round-trip + alignment rejection; `receive_batch_aggregates_multi_frame_blob_in_order` (Data+KyberRekey+Data in one blob, order preserved); `send_frames_splits_at_blob_cap` (9000 frames → 2 blobs, 8192-frame cap, frame-aligned) | cargo test |
@@ -92,7 +92,7 @@ randomized flows per execution.
 - **Wycheproof-style cross-check** of ML-KEM/ML-DSA against a second
   implementation (future work, noted in `vectors/README.md`).
 - **Tor/I2P/Nym interop tests against real daemons** — CI has no daemons;
-  live dialing is covered by local stub servers + the pty suites. Running
+  live dialing is covered by local stub servers + the headless suites. Running
   `NULL_LIVE_TRANSPORT=1` against real sidecars is an operator action
   (`docs/operations.md`).
 

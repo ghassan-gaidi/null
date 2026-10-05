@@ -10,17 +10,17 @@
 **Null** is a zero-telemetry, serverless, post-quantum peer-to-peer
 terminal messenger. It runs entirely in volatile RAM, leaves no forensic
 residue on disk, and provides **ongoing post-quantum rekeying inside a
-continuous triple ratchet** — the Apple PQ3 Level-3-style property — plus
-multi-transport censorship resistance (Tor / I2P / Nym / Snowflake /
-WebTunnel / obfs4), hardware-aware key isolation, and a formally verified
-establishment layer.
+continuous triple ratchet** — Kyber re-encapsulation mixed into the root
+key every ≤ 50 messages / 7 days — plus multi-transport censorship
+resistance (Tor / I2P / Nym / Snowflake / WebTunnel / obfs4), hardware
+presence probing, and a formally verified establishment layer.
 
 Proof status, stated plainly, in one paragraph:
 
 - **Engineered & tested**: 123 tests green, `clippy -D warnings` clean,
   committed known-answer vectors, a stable-channel deterministic fuzz
   corpus over every wire decoder, live two-process chats (deniable,
-  verified, TUI) proven over real sockets, and bit-identical reproducible
+  verified, TUI) exercised over real sockets, and bit-identical reproducible
   builds via `cargo xtask repro`.
 - **Formally verified**: the handshake is proven in the Dolev-Yao model
   with tamarin-prover (5/5 lemmas, enforced in CI) — establishment

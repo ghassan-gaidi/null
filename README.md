@@ -4,11 +4,18 @@
 ![Rust](https://img.shields.io/badge/rust-1.75%2B-orange)
 ![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 
+> **Mission.** Null exists to make private conversation *verifiable*:
+> end-to-end encrypted messaging with post-quantum forward secrecy and
+> healing, deniable by default, with no identifiers, no central servers,
+> and no disk residue — where every security claim traces to code,
+> proof, or test, and whatever isn't proven yet is labeled as such.
+
 **Null** is a zero-telemetry, serverless, post-quantum peer-to-peer terminal
 messenger. It runs entirely in volatile RAM, leaves zero forensic residue, and
-provides **Level 3 post-quantum messaging security**: ongoing post-quantum
-rekeying inside a continuous triple ratchet, multi-transport censorship
-resistance, and hardware-aware key isolation — all in a terminal-native app.
+provides **ongoing post-quantum rekeying inside a continuous triple ratchet**
+(Kyber re-encapsulation mixed into the root key every ≤ 50 messages / 7 days),
+multi-transport censorship resistance, and hardware-presence-aware key
+handling — all in a terminal-native app.
 
 Everything below is implemented and tested in this repository: 123 tests green,
 `clippy -D warnings` clean, reproducible builds verified bit-identical, and
@@ -37,32 +44,47 @@ live two-process chats (deniable, verified, TUI) proven over real sockets.
 
 ---
 
-## Null vs Signal vs iMessage vs Telegram
+## Null against the 2026 state of the art
 
 Rough comparison against publicly documented designs, on the dimensions
-Null optimizes for. Mainstream apps win on maturity, audit depth, and
-usability; Null trades all of that for serverlessness and
-metadata-resistance.
+Null optimizes for — updated for a field that moved in 2025: Signal's
+SPQR triple ratchet (with ProVerif models from day one and hax/F\*
+verification in CI) and the USENIX '25 formal analysis of Apple's PQ3
+redefined what "post-quantum messaging" has to mean. Mainstream apps win
+on maturity, audit depth, and usability; Null trades all of that for
+serverlessness, deniability, and metadata-resistance — and states the
+trade plainly instead of implying parity.
 
 | Dimension | Null | Signal | iMessage | Telegram |
 |---|---|---|---|---|
 | Architecture | Serverless P2P over Tor / I2P / Nym; no accounts, no central server | Centralized servers; account required | Centralized (Apple); Apple ID / phone number | Centralized cloud; phone-number account |
 | E2E by default | Yes — every session | Yes | Yes (but iCloud backups can expose message history unless Advanced Data Protection is on) | No — only opt-in Secret Chats are E2E; default cloud chats are server-accessible |
 | Identity | `.onion` + keys; `i=` fingerprint pinned out-of-band | Phone number (usernames added as a contact layer, number still required) | Apple ID / phone number | Phone number (@usernames are aliases) |
-| Post-quantum | ML-KEM-1024 at handshake **plus** ongoing rekey (≤ 50 msgs / 7 days) | PQXDH at handshake; ongoing ratchet remains classical ECDH | PQ3: PQ handshake plus ongoing PQ rekeying | None (classical MTProto) |
-| Forward secrecy / healing | Per-message ECDH + one-way chain + PQ rekey; loss becomes loud failure, never silent divergence | Double Ratchet (classical FS/PCS) | PQ3 ratchet (FS + ongoing PQ healing) | Secret Chats rotate keys; cloud chats have no E2E FS story |
+| Post-quantum | ML-KEM-1024 at handshake **plus** ongoing rekey (≤ 50 msgs / 7 days); ratchet proofs in progress (handshake proven 5/5) | SPQR triple ratchet (PQXDH + sparse PQ ratchet, erasure-coded exchange), proven FS/PCS with ProVerif models + hax/F\* in CI | PQ3: PQ handshake plus ongoing PQ rekeying, with published third-party formal analysis (USENIX Security '25) | None (classical MTProto) |
+| Forward secrecy / healing | Per-message ECDH + one-way chain + PQ rekey; loss becomes loud failure, never silent divergence | Triple Ratchet (classical + PQ FS/PCS, MAC'd downgrade-locked rollout) | PQ3 ratchet (FS + ongoing PQ healing) | Secret Chats rotate keys; cloud chats have no E2E FS story |
 | Deniable mode | Default: no signatures at all; `--verified` (ML-DSA-65) is opt-in | No user-facing deniable mode | No | No |
 | Metadata / cover traffic | Fixed 2048B frames, 1 frame/2s shaping + jitter, dummy cover; `.onion` resolution is remote (no local DNS leak) | Sealed sender + TLS to central servers; no padding/cover framing comparable to Null's | TLS to Apple infra; no user-visible cover traffic | TLS/MTProto to Telegram servers |
 | Censorship circumvention | Tor bridges, Snowflake, WebTunnel, obfs4, pluggable transports | Built-in circumvention (TLS proxies and related techniques) | None built-in | MTProto proxies |
 | Source availability | Fully open (MIT OR Apache-2.0), reproducible builds, Tamarin-checked handshake, committed KAT vectors | Open clients; server code published but run centrally | Closed source | Open clients; server closed |
 | Endpoint posture | Terminal-native, RAM-only, `mlock`, 3-pass panic wipe, duress PIN / decoy mode, USBGuard, clipboard auto-clear | Standard mobile/desktop app; data at rest on device, OS backups apply | Standard app; backups and iCloud sync apply | Standard app; cloud history by design |
-| Groups | TreeKEM commits, O(log n) path encapsulations, epoch hash-chaining (fork/gap/replay rejection) | Sender Keys (fan-out per sender) | Apple key-service mediated groups | Server-mediated groups |
+| Groups | TreeKEM commits, O(log n) path encapsulations, epoch hash-chaining (fork/gap/replay rejection); PQ node keys today, proofs in progress | Sender Keys (fan-out per sender, classical) | Apple key-service mediated groups | Server-mediated groups |
+
+Beyond these four: **MLS (RFC 9420)** is the standardized group protocol,
+with PQ cipher suites (ML-KEM/hybrid, X-Wing) still in IETF draft — the
+window Null-MLS targets is open but closing. **SimpleX** shares the
+no-identifier philosophy with PQ in direct chats; it is the closest
+architectural peer on metadata, differing on transport (its relay network
+vs Null's Tor/I2P/Nym overlay) and on deniability posture.
 
 Caveats, stated plainly:
 
-- Signal and iMessage have far deeper external review and far larger
-  adversarial exposure than Null; a comparison table is not a security
-  ranking.
+- Signal and iMessage have far deeper external review, published proofs,
+  and far larger adversarial exposure than Null; a comparison table is
+  not a security ranking, and Null's unproven rows say so in place.
+- "Proven" below means machine-checked lemmas on the named model — Signal
+  and Apple cite their own analyses; Null cites `model/handshake.spthy`
+  (5/5 in CI) and marks the ratchet as in progress. Test counts and KATs
+  are engineering evidence, not proofs, and are labeled as such.
 - Telegram's default chats are outside the E2E comparison by design —
   that is a product choice with real usability benefits (seamless
   multi-device cloud sync), not just a missing feature.
@@ -262,11 +284,13 @@ is given):
 
 ```
 null group create|keygen|join|info|roster|add|remove|update|sync|send|recv
+null devices enroll|revoke|list|active|member-id
 null update check|apply
 ```
 
-Group messaging lands in the next milestone (library + tests only
-today); `update check|apply` likewise. Stubs fail loudly until wired.
+All subcommands are wired and tested end-to-end (pipe-oriented base64
+state for groups/rosters; explicit keys and paths for updates).
+`--help` on any level lists the full grammar.
 
 ---
 
@@ -281,12 +305,20 @@ today); `update check|apply` likewise. Stubs fail loudly until wired.
   stub servers, HSM binding, evdev keymap, key-transparency log,
   downgrade-attack matrix, deniability tripwire, DeviceSet management,
   3-process multi-device flow.
-- **Live proofs**: scripted two-process chats (deniable, verified with pinned
-  fingerprints, graceful goodbye/drain shutdown) and automated pty-driven
-  TUI tests (loopback and live listener). Quitting can no longer RST away a
-  peer's in-flight messages.
+- **Live exercises**: scripted two-process chats (deniable, verified with pinned
+  fingerprints, graceful goodbye/drain shutdown) over real TCP sockets;
+  TUI behavior covered by headless in-crate tests (ratatui TestBackend
+  rendering, key routing, lock/duress) plus CLI subprocess tests driving
+  the real binary. Quitting can no longer RST away a peer's in-flight
+  messages.
 - **Reproducibility**: `cargo run -p xtask -- repro` builds twice and
-  compares hashes (verified identical).
+  compares hashes (verified identical), then verifies the pinned prover
+  tree against `pins.sha256` (loud skip when no install is present;
+  release-grade verification needs it).
+- **Supply-chain surface**: `cargo xtask sbom` emits the locked
+  dependency closure as JSON (offline, sorted, unknown licenses stay
+  null); cosign attestation is a documented manual release step
+  (`docs/release.md` §4).
 - **Gates**: `cargo fmt --check`, `cargo clippy --locked --all-targets
   -- -D warnings`, `cargo test --workspace`,
   `cargo xtask fuzz`, `cargo xtask kat --check`, `cargo xtask doccheck`
@@ -308,8 +340,9 @@ today); `update check|apply` likewise. Stubs fail loudly until wired.
 
 NIST FIPS 203 (ML-KEM-1024) · FIPS 204 (ML-DSA-65) · FIPS 205
 (SLH-DSA-SHA2-128s hybrid release signatures, both mandatory) ·
-MLS-inspired group commits (RFC 9420 family) · Apple PQ3
-Level-3-style ongoing rekeying · SLSA-style reproducible builds.
+MLS-inspired group commits (RFC 9420 family; PQ suites there still draft) ·
+ongoing rekeying in the PQ3 style (per-message ECDH + periodic PQ
+re-encapsulation) · SLSA-style reproducible builds.
 
 ---
 
